@@ -157,6 +157,8 @@ export function createSession(timeline, options = {}) {
       rows,
       state: session.epoch.state,
       reveal: session.epoch.reveal,
+      /** legacy per-team attempt counts, for boards without an event timeline */
+      triesFallback: session.timeline.triesFallback ?? null,
       detached: session.detached,
       speed: session.speed,
       revision: session.revision,

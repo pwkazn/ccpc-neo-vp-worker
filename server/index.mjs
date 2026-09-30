@@ -309,6 +309,16 @@ export async function createServer(options) {
 
       if (await assets.serve(req, res, pathname)) return;
 
+      const harness = await assets.serveHarness(pathname);
+      if (harness !== null) {
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+        });
+        res.end(req.method === 'HEAD' ? undefined : harness);
+        return;
+      }
+
       sendError(req, res, 404, 'not_found', `未找到 ${pathname}`);
     } catch (error) {
       const status = error.httpStatus

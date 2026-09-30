@@ -77,6 +77,10 @@ const app = {
   board: null,
   rafId: 0,
   lastBoardRender: 0,
+  /** start time carried over from the URL until the timeline is loaded */
+  pendingStartAt: null,
+  /** playback speed carried over from the URL */
+  pendingSpeed: null,
   /** teams retained for the future balloon feature */
   pinnedTeamId: null,
 };
@@ -225,6 +229,88 @@ function setupStartMode() {
   el.fieldAbsolute.hidden = !absolute;
 }
 
+// ------------------------------------------------------------ URL parameters
+
+/**
+ * Read the VP configuration from the query string and apply it to the form.
+ * Recognised params: uk, start (epoch ms or ISO), delay (seconds), speed,
+ * freeze (auto|never), scope (all|official), official (0|1), start_now (1).
+ * @returns {{ applyImmediately: boolean, ready: boolean }}
+ */
+function applyUrlParams() {
+  const params = new URLSearchParams(location.search);
+  let applyImmediately = params.get('start_now') === '1';
+  let ready = false;
+
+  const uk = params.get('uk');
+  if (uk) {
+    app.selectedUk = uk;
+    ready = true;
+    // Reflect it in the search box so the list filters down to it.
+    el.contestSearch.value = uk;
+  }
+
+  const delay = params.get('delay');
+  if (delay !== null && Number.isFinite(Number(delay))) {
+    el.startDelay.value = String(Number(delay));
+  }
+
+  const start = params.get('start');
+  if (start) {
+    const epoch = /^\d+$/.test(start) ? Number(start) : new Date(start).getTime();
+    if (Number.isFinite(epoch)) {
+      app.pendingStartAt = epoch;
+      el.startMode.value = 'absolute';
+      el.startAbsolute.value = toLocalInputValue(epoch);
+      setupStartMode();
+      applyImmediately = applyImmediately || epoch <= Date.now();
+    }
+  }
+
+  const speed = Number(params.get('speed'));
+  if (SPEEDS.includes(speed)) app.pendingSpeed = speed;
+
+  const freeze = params.get('freeze');
+  if (freeze === 'auto' || freeze === 'never') {
+    el.freezeMode.value = freeze;
+    el.settingsFreeze.value = freeze;
+  }
+
+  const scope = params.get('scope');
+  if (scope === 'all' || scope === 'official') {
+    el.revealScope.value = scope;
+    el.settingsScope.value = scope;
+  }
+
+  const official = params.get('official');
+  if (official === '0' || official === '1') {
+    el.officialOnly.checked = official === '1';
+  }
+
+  return { applyImmediately, ready };
+}
+
+/** Format an epoch ms as the `YYYY-MM-DDTHH:MM` string a datetime-local input wants. */
+function toLocalInputValue(epochMs) {
+  const date = new Date(epochMs);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+    + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** Keep the query string in sync so the current VP is bookmarkable. */
+function syncUrl() {
+  if (!app.session || !app.selectedUk) return;
+  const params = new URLSearchParams();
+  params.set('uk', app.selectedUk);
+  if (app.session.startAt) params.set('start', String(Math.round(app.session.startAt)));
+  if (app.session.speed !== 1) params.set('speed', String(app.session.speed));
+  if (app.session.freezeMode !== 'auto') params.set('freeze', app.session.freezeMode);
+  if (app.session.revealScope !== 'all') params.set('scope', app.session.revealScope);
+  if (!app.session.officialOnly) params.set('official', '0');
+  history.replaceState(null, '', `${location.pathname}?${params}`);
+}
+
 /** Resolve the chosen start time into epoch ms. */
 function resolveStartAt() {
   if (el.startMode.value === 'absolute') {
@@ -246,7 +332,7 @@ async function startVp() {
 
   let startAt;
   try {
-    startAt = resolveStartAt();
+    startAt = app.pendingStartAt ?? resolveStartAt();
   } catch (error) {
     setError(error.message);
     return;
@@ -262,10 +348,13 @@ async function startVp() {
     app.session = createSession(timeline, {
       startAt,
       now: Date.now(),
+      speed: app.pendingSpeed ?? 1,
       freezeMode: el.freezeMode.value,
       revealScope: el.revealScope.value,
       officialOnly: el.officialOnly.checked,
     });
+    app.pendingStartAt = null;
+    syncUrl();
     enterCountdown();
   } catch (error) {
     setError(`加载失败：${error.message}`);
@@ -338,6 +427,10 @@ function stopLoop() {
   app.rafId = 0;
 }
 
+/**
+ * Advance the session to the wall clock and render the right view.
+ * A past `startAt` (restored from the URL) goes straight to the board.
+ */
 function updateUi() {
   const session = app.session;
   if (!session) return;
@@ -345,10 +438,12 @@ function updateUi() {
   const frame = session.update(Date.now());
 
   if (frame.contestSec < 0) {
-    renderCountdown(frame);
+    if (!el.viewCountdown.hidden) renderCountdown(frame);
+    else showView('countdown');
     return;
   }
-  if (el.viewCountdown.hidden === false) enterBoard();
+
+  if (el.viewBoard.hidden) enterBoard();
   renderBoard(frame);
 }
 
@@ -359,6 +454,7 @@ function renderCountdown(frame) {
   el.countdownValue.textContent = minutes > 0
     ? `${minutes}:${String(seconds).padStart(2, '0')}`
     : `${Math.ceil(remaining)}`;
+  el.countdownMeta.textContent = buildCountdownMeta();
 }
 
 function renderBoard(frame) {
@@ -470,6 +566,7 @@ el.teamFilter.addEventListener('input', () => {
 
 el.officialOnly.addEventListener('change', () => {
   app.session?.setOfficialOnly(el.officialOnly.checked, Date.now());
+  syncUrl();
   updateUi();
 });
 
@@ -484,12 +581,14 @@ el.btnSettings.addEventListener('click', () => {
 el.settingsFreeze.addEventListener('change', () => {
   app.session?.setFreezeMode(el.settingsFreeze.value, Date.now());
   el.freezeMode.value = el.settingsFreeze.value;
+  syncUrl();
   updateUi();
 });
 
 el.settingsScope.addEventListener('change', () => {
   app.session?.setRevealScope(el.settingsScope.value, Date.now());
   el.revealScope.value = el.settingsScope.value;
+  syncUrl();
   updateUi();
 });
 
@@ -516,5 +615,16 @@ window.addEventListener('beforeunload', stopLoop);
 // ------------------------------------------------------------------ boot
 
 setupStartMode();
+
+const urlState = applyUrlParams();
 showView('picker');
-void loadContests();
+
+void (async () => {
+  await loadContests();
+  if (!urlState.ready) return;
+
+  // A `uk` (and possibly a past start time) was supplied: jump straight in.
+  renderContestList();
+  el.btnStart.disabled = false;
+  if (urlState.applyImmediately) await startVp();
+})();

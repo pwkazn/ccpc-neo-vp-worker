@@ -127,6 +127,22 @@ test('static server refuses traversal and unmatched prefixes', async () => {
   assert.equal((await respond('/app/does-not-exist.mjs')).served, false);
 });
 
+test('harness route is inert unless explicitly enabled', async () => {
+  const assets = createStaticServer();
+  delete process.env.CCPC_NEO_VP_HARNESS;
+  assert.equal(await assets.serveHarness('/__harness/anything.html'), null);
+  assert.equal(await assets.serveHarness('/__harness/../package.json'), null);
+
+  process.env.CCPC_NEO_VP_HARNESS = '1';
+  try {
+    // Path traversal is still rejected even with the harness enabled.
+    assert.equal(await assets.serveHarness('/__harness/../../package.json'), null);
+    assert.equal(await assets.serveHarness('/__harness/does-not-exist.html'), null);
+  } finally {
+    delete process.env.CCPC_NEO_VP_HARNESS;
+  }
+});
+
 test('parseArgs reads flags, positionals and defaults', () => {
   const parsed = parseArgs(['--port', '4321', '--host', '0.0.0.0', '--data-dir', '/tmp/x']);
   assert.equal(parsed.port, 4321);

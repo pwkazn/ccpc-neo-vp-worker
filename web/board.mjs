@@ -26,6 +26,52 @@ export const COLUMN_WIDTHS = Object.freeze({
 });
 
 /**
+ * Content of one problem cell, derived only from replayed state.
+ *
+ * The alias being hidden does not affect this: a team's solve on an unrevealed
+ * problem is still shown (the CCPC new format shows *that* a problem was solved,
+ * just not which one).
+ *
+ * @param {object} state replay state
+ * @param {number} teamIdx
+ * @param {number} probIdx
+ * @param {ArrayLike<number>|null} [triesFallback] per-team attempt counts used by
+ *   legacy ranklists that carry no per-solution timestamps. Pass `null` when the
+ *   timeline is exact, so the live count is authoritative. A per-problem entry of
+ *   `-1` also means "unknown, use the live count".
+ * @returns {{ text: string, className: string, solved: boolean, attempted: boolean }}
+ */
+export function cellContent(state, teamIdx, probIdx, triesFallback = null) {
+  const key = teamIdx * state.problemCount + probIdx;
+  const acAt = state.acAt[key];
+  const live = state.subs[key];
+  const fallback = triesFallback?.[teamIdx]?.[probIdx] ?? -1;
+  const tries = fallback >= 0 ? Math.max(live, fallback) : live;
+
+  if (acAt !== -1) {
+    const minutes = Math.floor(acAt / 60);
+    const wrong = Math.max(0, tries - 1);
+    return {
+      text: wrong > 0 ? `${minutes}(${wrong})` : String(minutes),
+      className: 'cell cell--solved',
+      solved: true,
+      attempted: true,
+    };
+  }
+
+  if (tries > 0) {
+    return {
+      text: `-${tries}`,
+      className: 'cell cell--failed',
+      solved: false,
+      attempted: true,
+    };
+  }
+
+  return { text: '', className: 'cell', solved: false, attempted: false };
+}
+
+/**
  * @param {object} options
  * @param {HTMLElement} options.container scroll container (`#board`)
  * @param {object} options.timeline wire timeline
@@ -169,26 +215,11 @@ export function createBoard({ container, timeline }) {
     for (let position = 0; position < problemCount; position++) {
       const probIdx = order[position];
       const td = cells[STICKY.length + position];
-      const key = row.teamIdx * problemCount + probIdx;
-      const acAt = state.acAt[key];
-      const tries = state.subs[key];
-      const solved = acAt !== -1;
-      const attempted = tries > 0;
+      const content = cellContent(state, row.teamIdx, probIdx, frame.triesFallback);
 
-      let cls = 'cell';
-      let text = '';
-      if (solved) {
-        cls += ' cell--solved';
-        const minutes = Math.floor(acAt / 60);
-        const wrong = Math.max(0, tries - 1);
-        text = wrong > 0 ? `${minutes}(${wrong})` : String(minutes);
-      } else if (attempted) {
-        cls += ' cell--failed';
-        text = `-${tries}`;
-      }
+      if (td.className !== content.className) td.className = content.className;
+      if (td.textContent !== content.text) td.textContent = content.text;
 
-      if (td.className !== cls) td.className = cls;
-      if (td.textContent !== text) td.textContent = text;
       const prob = String(probIdx);
       if (td.dataset.prob !== prob) td.dataset.prob = prob;
       const isRevealed = reveal.revealSec[probIdx] !== Infinity

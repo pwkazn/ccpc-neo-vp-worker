@@ -69,19 +69,29 @@ export function createSession(timeline, options = {}) {
     declaredFreezeSec,
 
     now,
-    startAt: options.startAt ?? now,
+    /**
+     * The contest clock is anchored by (contest second, wall clock) plus a
+     * playback rate. Keeping the anchor explicit and separate from the rate is
+     * what makes `start` mean "this many contest seconds have already elapsed
+     * at 1x" regardless of the speed chosen for *future* playback.
+     */
+    anchorSec: 0,
+    anchorMs: now,
     speed: SPEEDS.includes(options.speed) ? options.speed : 1,
     freezeEnabled,
     freezeDurationSec,
+
+    /** `startAt` is the wall clock at which the contest second was 0 */
+    startAt: options.startAt ?? now,
 
     revealScope: options.revealScope === 'official' ? 'official' : 'all',
     officialOnly: options.officialOnly !== false,
     autoReveal: options.autoReveal !== false,
 
-    /** true when the clock is detached from the wall clock */
+    /** true when the clock is detached from the wall clock (paused/scrubbing) */
     detached: false,
-    /** contest second used while detached */
-    atSec: 0,
+    /** contest second the clock is frozen at while detached */
+    detachSec: 0,
     /** set once the board is unlocked (end of contest, or manual reveal) */
     revealed: false,
 
@@ -92,23 +102,35 @@ export function createSession(timeline, options = {}) {
   };
 
   /**
-   * Contest seconds elapsed according to the wall clock, ignoring detach.
-   * Keeps `(now - startAt)/1000 * speed` exact (no per-tick accumulation).
+   * Contest seconds elapsed since the anchor, at the current speed.
+   * `(now - anchorMs)` is the *live* elapsed time, so the initial "already
+   * elapsed" amount lands in `anchorSec` and is never scaled.
    */
-  function liveSec() {
-    return ((session.now - session.startAt) / 1000) * session.speed;
+  function elapsedSec() {
+    return ((session.now - session.anchorMs) / 1000) * session.speed;
   }
 
   /** Contest second the session is currently showing. */
   function currentSec() {
-    return session.detached ? session.atSec : liveSec();
+    return session.detached
+      ? session.detachSec
+      : session.anchorSec + elapsedSec();
+  }
+
+  /**
+   * Re-anchor the clock at `(sec, ms)`.
+   * Use before changing `speed` so the shown second does not jump.
+   */
+  function rebase(sec, ms) {
+    session.anchorSec = sec;
+    session.anchorMs = ms;
   }
 
   /** Detach the clock, keeping the current contest second. */
   function detach(nowSec = session.now) {
     session.now = nowSec;
     if (!session.detached) {
-      session.atSec = liveSec();
+      session.detachSec = currentSec();
       session.detached = true;
     }
     return session;
@@ -118,15 +140,16 @@ export function createSession(timeline, options = {}) {
   function attach(nowSec = session.now) {
     session.now = nowSec;
     if (session.detached) {
-      const sec = session.atSec;
-      session.startAt = nowSec - (sec / session.speed) * 1000;
+      const sec = session.detachSec;
       session.detached = false;
+      rebase(sec, nowSec);
     }
     return session;
   }
 
   session.currentSec = currentSec;
-  session.liveSec = liveSec;
+  session.elapsedSec = elapsedSec;
+  session.rebase = rebase;
 
   /** Freeze-aware view of the requested contest time. */
   session.freezeState = function freezeState() {
@@ -162,27 +185,45 @@ export function createSession(timeline, options = {}) {
   /** Compute a fresh board frame and memoise it. */
   session.computeFrame = function computeFrame() {
     /**
-     * Two different times:
-     *   - `contestSec` is the real contest clock. It keeps running during a
-     *     freeze, so the timer and progress bar stay honest;
-     *   - `boardSec` is the second the *board contents* describe. During a
-     *     freeze it is held at the freeze second, so no post-freeze result can
-     *     leak out.
+     * Three times matter:
+     *   - `contestSec` is the real contest clock. It always runs, so the timer
+     *     and progress bar stay honest;
+     *   - `boardSec` is the second the *results* on the board describe. During a
+     *     freeze it is held at the freeze second, so no post-freeze solve or
+     *     penalty can leak out;
+     *   - `pendingSec` is the second the *submission counts* describe. A frozen
+     *     ranklist still shows that a team submitted, so pending attempts keep
+     *     appearing live even while every result is withheld.
      */
     const contestSec = currentSec();
     const freeze = session.freezeState();
     const boardSec = Math.max(0, Math.floor(freeze.visibleSec));
+    const pendingSec = freeze.frozen ? Math.max(boardSec, Math.floor(contestSec)) : boardSec;
 
     const { rows, stats } = session.epoch.frameAt(boardSec, {
       officialOnly: session.officialOnly,
     });
 
+    // While frozen, how many submissions landed after the board second. The
+    // board adds these to the pre-freeze attempt count to render `?N`, and the
+    // header's submitted figure keeps growing with them.
+    let liveSubs = null;
+    if (freeze.frozen) {
+      const live = session.epoch.liveSubmissionsAt(pendingSec);
+      const base = session.epoch.liveSubmissionsAt(boardSec);
+      if (live.length === base.length) {
+        liveSubs = new Int32Array(live.length);
+        for (let i = 0; i < live.length; i++) liveSubs[i] = live[i] - base[i];
+      }
+      const liveTeams = session.epoch.submittedTeamsAt(pendingSec);
+      stats.submitted = Array.from(liveTeams);
+    }
+
     session.lastBoardSec = boardSec;
     session.frame = {
       contestSec,
       boardSec,
-      /** @deprecated alias: older call sites used `visibleSec` for board time */
-      visibleSec: boardSec,
+      pendingSec,
       frozen: freeze.frozen,
       frozenAtSec: freeze.frozenAtSec,
       revealPending: freeze.revealPending,
@@ -192,6 +233,8 @@ export function createSession(timeline, options = {}) {
       state: session.epoch.state,
       /** live per-problem solve counts, reveal flags and header order */
       stats,
+      /** post-board-second submissions, for the pending `?N` tally */
+      liveSubs,
       triesFallback: session.timeline.triesFallback ?? null,
       detached: session.detached,
       speed: session.speed,
@@ -203,17 +246,19 @@ export function createSession(timeline, options = {}) {
   /**
    * Advance the session to the current wall clock.
    *
-   * Recomputes the board only when the *board* second changed, so the clock can
-   * tick smoothly while the frozen board stands still.
+   * Recomputes when the board second changed, or — while frozen — when the
+   * pending second advanced, so pending submissions keep appearing on time.
    */
   session.update = function update(nowSec = Date.now()) {
     session.now = nowSec;
     const contestSec = currentSec();
     const freeze = session.freezeState();
     const boardSec = Math.max(0, Math.floor(freeze.visibleSec));
+    const pendingSec = freeze.frozen ? Math.max(boardSec, Math.floor(contestSec)) : boardSec;
 
     const stale = session.frame === null
       || boardSec !== session.lastBoardSec
+      || session.frame.pendingSec !== pendingSec
       || session.frame.revision !== session.revision;
 
     if (stale) return session.computeFrame();
@@ -228,12 +273,12 @@ export function createSession(timeline, options = {}) {
     const sec = currentSec();
     if (session.detached) {
       // Stay detached; playback resumes when the caller re-attaches.
-      session.atSec = sec;
+      session.detachSec = sec;
       session.speed = speed;
     } else {
-      // Stay at the live edge but rebase so the shown second is unchanged.
+      // Keep the shown second fixed and let the new rate apply from here on.
       session.speed = speed;
-      session.startAt = nowSec - (sec / speed) * 1000;
+      rebase(sec, nowSec);
     }
     session.revision++;
     return session.update(nowSec);
@@ -257,7 +302,7 @@ export function createSession(timeline, options = {}) {
 
   /** Jump to an absolute contest second (scrubbing); detaches the clock. */
   session.seek = function seek(contestSec, nowSec = session.now) {
-    session.atSec = Math.max(0, Math.min(contestSec, session.durationSec));
+    session.detachSec = Math.max(0, Math.min(contestSec, session.durationSec));
     session.detached = true;
     session.now = nowSec;
     session.revision++;
@@ -271,12 +316,19 @@ export function createSession(timeline, options = {}) {
     return result.update(nowSec);
   };
 
-  /** Set the VP start time (used for the initial countdown). */
+  /**
+   * Set the VP start time (used for the initial countdown).
+   *
+   * The contest second at `nowSec` is the plain wall-clock difference — never
+   * scaled by the playback speed. Speed only ever affects how fast the clock
+   * advances from here.
+   */
   session.setStartAt = function setStartAt(startAt, nowSec = Date.now()) {
     session.startAt = startAt;
     session.detached = false;
     session.revealed = false;
     session.now = nowSec;
+    rebase((nowSec - startAt) / 1000, nowSec);
     session.lastBoardSec = -1;
     session.revision++;
     return session.update(nowSec);
@@ -324,6 +376,12 @@ export function createSession(timeline, options = {}) {
     return session.update(nowSec);
   };
 
+  /**
+   * Prime the frame using the plain wall-clock offset from `startAt`. This must
+   * not depend on the playback speed: `speed` is how fast the clock will run
+   * from now on, not a factor applied to the contest time already elapsed.
+   */
+  rebase((session.now - session.startAt) / 1000, session.now);
   session.frame = session.computeFrame();
   return session;
 }

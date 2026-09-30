@@ -57,7 +57,7 @@ export const STICKY_OFFSETS = (() => {
  * A hidden alias does not change this: the new format shows *that* a problem
  * was solved, just not which one.
  *
- * @param {object} state replay state
+ * @param {object} state replay state (results pinned to the board second)
  * @param {number} teamIdx
  * @param {number} probIdx
  * @param {ArrayLike<number>|null} [triesFallback] legacy per-team attempt counts
@@ -66,16 +66,23 @@ export const STICKY_OFFSETS = (() => {
  * @param {object} [options]
  * @param {boolean} [options.frozen] when frozen, an unsolved but attempted
  *   problem is an *unknown* result and is rendered as a pending `?N` cell
+ * @param {number} [options.pending] submissions that landed after the board
+ *   second. A frozen ranklist still shows these appearing in real time.
  * @returns {{ text: string, className: string, solved: boolean, attempted: boolean, pending: boolean }}
  */
 export function cellContent(state, teamIdx, probIdx, triesFallback = null, options = {}) {
-  const key = teamIdx * state.problemCount + probIdx;
+  const problems = state.problemCount;
+  const key = teamIdx * problems + probIdx;
   const acAt = state.acAt[key];
   const live = state.subs[key];
   const fallback = triesFallback?.[teamIdx]?.[probIdx] ?? -1;
-  const tries = fallback >= 0 ? Math.max(live, fallback) : live;
+  const base = fallback >= 0 ? Math.max(live, fallback) : live;
+  const extra = Math.max(0, options.pending ?? 0);
+  const tries = base + extra;
 
   if (acAt !== -1) {
+    // A solve known at the board second stays solved, even if the team kept
+    // submitting afterwards (those submissions are ignored by rule 4 anyway).
     const minutes = Math.floor(acAt / 60);
     const wrong = Math.max(0, tries - 1);
     return {
@@ -88,8 +95,8 @@ export function cellContent(state, teamIdx, probIdx, triesFallback = null, optio
   }
 
   if (tries > 0) {
-    // Frozen ranklists show this as "submitted, result unknown": the old ICPC
-    // board drew a blue question mark with the number of attempts.
+    // Frozen: the result is unknown, so show the classic ICPC blue question
+    // mark with the attempt count.
     if (options.frozen) {
       return {
         text: `?${tries}`,
@@ -168,7 +175,7 @@ export function createBoard({ container, timeline }) {
     cell.style.width = `${COLUMN_WIDTHS.solved}px`;
     // Tag the header cell with its problem index. Header and rows must agree on
     // which problem each column holds, and carrying the id on both sides is
-    // what makes that verifiable (this was previously missing entirely).
+    // what makes that verifiable.
     cell.dataset.prob = String(probIdx);
     if (problem.color) cell.style.setProperty('--prob-color', problem.color);
 
@@ -309,7 +316,11 @@ export function createBoard({ container, timeline }) {
     for (let position = 0; position < problemCount; position++) {
       const probIdx = order[position];
       const td = cells[STICKY.length + position];
-      const content = cellContent(state, row.teamIdx, probIdx, frame.triesFallback, { frozen });
+      const content = cellContent(state, row.teamIdx, probIdx, frame.triesFallback, {
+        frozen,
+        // Submissions after the board second keep arriving while frozen.
+        pending: frame.liveSubs ? frame.liveSubs[row.teamIdx * problemCount + probIdx] : 0,
+      });
       const revealed = aliasVisible(probIdx);
 
       // A solve on a still-hidden problem is shown as solved but tinted

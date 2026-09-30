@@ -93,6 +93,36 @@ function replay(timeline, tSec, options = {}) {
   return { state, stats: problemStatus(state, tSec, options) };
 }
 
+/**
+ * A cell as the board would render it in a session frame, in the same shape
+ * `web/board.mjs`'s `cellContent()` returns.
+ *
+ * Reimplemented here rather than imported because `web/board.mjs` uses
+ * browser-absolute module paths (`/shared/rules.mjs`) that Node cannot resolve;
+ * `test/board.test.mjs` covers the real implementation.
+ *
+ * @param {object} frame output of `session.update()`
+ * @param {number} teamIdx
+ * @param {number} probIdx
+ */
+function frameCell(frame, teamIdx, probIdx) {
+  const key = teamIdx * frame.state.problemCount + probIdx;
+  const acAt = frame.state.acAt[key];
+  const pending = frame.liveSubs ? frame.liveSubs[key] : 0;
+  const tries = frame.state.subs[key] + pending;
+
+  if (acAt !== -1) {
+    return { text: String(Math.floor(acAt / 60)), className: 'cell cell--solved', solved: true, pending: false };
+  }
+  if (tries > 0 && frame.frozen) {
+    return { text: `?${tries}`, className: 'cell cell--pending', solved: false, pending: true };
+  }
+  if (tries > 0) {
+    return { text: `-${tries}`, className: 'cell cell--failed', solved: false, pending: false };
+  }
+  return { text: '', className: 'cell', solved: false, pending: false };
+}
+
 // ------------------------------------------------------------- threshold rule
 
 test('revealThreshold is the smaller of floor(N * 20%) and 50', () => {
@@ -639,7 +669,7 @@ test('a freeze can be requested for a contest that declares none', () => {
   });
   const frozen = on.update(t0 + 15_000_000);
   assert.equal(frozen.frozen, true);
-  assert.equal(frozen.visibleSec, 14400, 'the explicit hour applies');
+  assert.equal(frozen.boardSec, 14400, 'the explicit hour applies');
 });
 
 test('an undeclared freeze length falls back to the 60-minute convention', () => {
@@ -664,10 +694,10 @@ test('the declared freeze length is adopted when present', () => {
   assert.equal(session.freezeDurationSec, 1800);
   // A 30-minute freeze starts at 16200, so 15000 is still live.
   assert.equal(session.update(t0 + 15_000_000).frozen, false);
-  assert.equal(session.update(t0 + 15_000_000).visibleSec, 15000);
+  assert.equal(session.update(t0 + 15_000_000).boardSec, 15000);
   const frozen = session.update(t0 + 16_300_000);
   assert.equal(frozen.frozen, true);
-  assert.equal(frozen.visibleSec, 16200);
+  assert.equal(frozen.boardSec, 16200);
 });
 
 test('the freeze length can be changed mid-VP', () => {
@@ -676,13 +706,13 @@ test('the freeze length can be changed mid-VP', () => {
   });
   const t0 = 1_000_000_000_000;
   const session = createSession(timeline, { startAt: t0, now: t0 });
-  assert.equal(session.update(t0 + 16_000_000).visibleSec, 14400);
+  assert.equal(session.update(t0 + 16_000_000).boardSec, 14400);
   session.setFreezeMinutes(120, t0 + 16_000_000);
-  assert.equal(session.update(t0 + 16_000_000).visibleSec, 10800);
+  assert.equal(session.update(t0 + 16_000_000).boardSec, 10800);
   session.setFreezeEnabled(false, t0 + 16_000_000);
   const live = session.update(t0 + 16_000_000);
   assert.equal(live.frozen, false);
-  assert.equal(live.visibleSec, 16000);
+  assert.equal(live.boardSec, 16000);
 });
 
 test('the freeze length accepts ordinary round numbers', () => {
@@ -701,7 +731,7 @@ test('the freeze length accepts ordinary round numbers', () => {
 
   session.setFreezeMinutes(60, t0 + 16_000_000);
   assert.equal(session.freezeDurationSec, 3600);
-  assert.equal(session.update(t0 + 16_000_000).visibleSec, 14400, 'freeze starts at 14400');
+  assert.equal(session.update(t0 + 16_000_000).boardSec, 14400, 'freeze starts at 14400');
 });
 
 test('a zero or negative freeze length disables the freeze', () => {
@@ -793,13 +823,66 @@ test('session goes through countdown, running, frozen and revealed', () => {
 
   const frozen = session.update(t0 + 10_000 + 15_000_000);
   assert.equal(frozen.phase, PHASE.FROZEN);
-  assert.equal(frozen.visibleSec, 14400, 'board is pinned to the freeze second');
+  assert.equal(frozen.boardSec, 14400, 'board is pinned to the freeze second');
   assert.ok(frozen.contestSec > 14400, 'the real clock keeps running while frozen');
 
   const end = session.update(t0 + 10_000 + 18_000_000);
   assert.equal(end.phase, PHASE.ENDED);
   assert.equal(end.revealed, true, 'the freeze lifts automatically at the end');
-  assert.equal(end.visibleSec, 18000);
+  assert.equal(end.boardSec, 18000);
+});
+
+test('pending submissions keep arriving while the board is frozen', () => {
+  // 10 teams, 1 problem, threshold min(floor(10*0.2), 50) = 2.
+  // Team 0 solves early. Teams 1 and 2 submit only AFTER the freeze starts.
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 1,
+    durationSec: 18000,
+    frozenDurationSec: 3600, // freezes at 14400
+    events: [
+      [600, 0, 0, RESULT.AC],
+      [14500, 1, 0, RESULT.WA],
+      [15000, 1, 0, RESULT.WA],
+      [16000, 2, 0, RESULT.TLE],
+    ],
+  });
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0 });
+  const board = (sec) => session.update(t0 + sec * 1000);
+
+  assert.equal(board(14400).frozen, false, 'the freeze starts strictly after 14400');
+
+  // Just after the freeze: team 1 has one submission, and it is pending.
+  const early = board(14600);
+  assert.equal(early.frozen, true);
+  assert.equal(early.boardSec, 14400, 'results are pinned');
+  assert.equal(early.pendingSec, 14600, 'but the pending clock has advanced');
+  assert.equal(frameCell(early, 1, 0).text, '?1');
+  assert.equal(frameCell(early, 1, 0).pending, true);
+
+  // Later: team 1 submitted again and team 2 has submitted too.
+  const later = board(16100);
+  assert.equal(later.boardSec, 14400, 'still pinned');
+  assert.equal(frameCell(later, 1, 0).text, '?2', 'team 1 now shows two pending attempts');
+  assert.equal(frameCell(later, 2, 0).text, '?1', 'team 2 appears as pending');
+
+  // A known solve is unaffected: the freeze hides results, not solved problems.
+  assert.equal(frameCell(later, 0, 0).className, 'cell cell--solved');
+
+  // The header's submitted figure keeps growing too.
+  assert.ok(
+    later.stats.submitted[0] > early.stats.submitted[0],
+    'the submitted team count keeps rising while frozen',
+  );
+
+  // Once unfrozen the pending cells resolve to real results.
+  const ended = board(18100);
+  assert.equal(ended.frozen, false);
+  assert.equal(ended.boardSec, 18000);
+  assert.equal(frameCell(ended, 1, 0).className, 'cell cell--failed');
+  assert.equal(frameCell(ended, 1, 0).text, '-2');
+  assert.equal(frameCell(ended, 1, 0).pending, false);
 });
 
 test('a frozen board keeps its clock and progress running', () => {
@@ -848,7 +931,7 @@ test('a frozen session stops reflecting new events, and unfreezing reveals them'
 
   const frozen = session.update(t0 + 16_000_000);
   assert.equal(frozen.frozen, true);
-  assert.equal(frozen.visibleSec, 14400);
+  assert.equal(frozen.boardSec, 14400);
   assert.equal(frozen.rows[0].solved, 1, 'the 15000s solve is invisible while frozen');
 
   const revealed = session.reveal(t0 + 16_000_000);
@@ -872,7 +955,7 @@ test('freeze mode never keeps the board live to the end', () => {
   const session = createSession(timeline, { startAt: t0, now: t0, freezeEnabled: false });
   const frame = session.update(t0 + 16_000_000);
   assert.equal(frame.frozen, false);
-  assert.equal(frame.visibleSec, 16000);
+  assert.equal(frame.boardSec, 16000);
   assert.equal(frame.rows[0].solved, 2);
 });
 
@@ -910,7 +993,7 @@ test('a whole contest freezes, holds, then fully unfreezes at the end', () => {
   // Inside the freeze window: pinned, and the later solves are invisible.
   const frozen = session.update(t0 + 16000 * 1000);
   assert.equal(frozen.phase, PHASE.FROZEN);
-  assert.equal(frozen.visibleSec, 14400);
+  assert.equal(frozen.boardSec, 14400);
   assert.equal(frozen.revealed, false, 'not unfrozen yet');
   assert.deepEqual(frozen.stats.solved, [4, 0, 0], 'post-freeze solves are hidden');
   assert.deepEqual(frozen.stats.revealed, [true, false, false]);
@@ -920,7 +1003,7 @@ test('a whole contest freezes, holds, then fully unfreezes at the end', () => {
   assert.equal(ended.phase, PHASE.ENDED);
   assert.equal(ended.frozen, false);
   assert.equal(ended.revealed, true);
-  assert.equal(ended.visibleSec, 18000);
+  assert.equal(ended.boardSec, 18000);
   assert.deepEqual(ended.stats.solved, [4, 4, 1], 'the true final counts');
   assert.deepEqual(ended.stats.revealed, [true, true, false], 'B reveals, C never does');
 });
@@ -963,8 +1046,8 @@ test('session clamps seek to the contest duration', () => {
   const timeline = makeTimeline({ teams: 1, problems: 1, events: [], durationSec: 1000 });
   const t0 = 1_000_000_000_000;
   const session = createSession(timeline, { startAt: t0, now: t0 });
-  assert.equal(session.seek(99999, t0).visibleSec, 1000);
-  assert.equal(session.seek(-5, t0).visibleSec, 0);
+  assert.equal(session.seek(99999, t0).boardSec, 1000);
+  assert.equal(session.seek(-5, t0).boardSec, 0);
 });
 
 test('session switching reveal scope changes the counted population', () => {

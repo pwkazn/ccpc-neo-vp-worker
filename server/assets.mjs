@@ -103,33 +103,11 @@ export function createStaticServer(options = {}) {
     return true;
   }
 
-  return { serve, serveIndex, serveHarness, mounts, webRoot, sharedRoot, indexPath };
+  return { serve, serveIndex, mounts, webRoot, sharedRoot, indexPath };
 
   /** Serve the single-page app shell. */
   async function serveIndex() {
     return fs.readFile(indexPath, 'utf8');
-  }
-
-  /**
-   * Serve a local verification harness from `.dsh-tmp/`.
-   *
-   * Only enabled when `CCPC_NEO_VP_HARNESS=1`, so a normal run never exposes it.
-   * Used by the UI verification driver to render the board synchronously.
-   *
-   * @param {string} pathname
-   * @returns {Promise<string|null>} HTML, or null when unavailable
-   */
-  async function serveHarness(pathname) {
-    if (process.env.CCPC_NEO_VP_HARNESS !== '1') return null;
-    const match = /^\/__harness\/([A-Za-z0-9._-]+\.html)$/.exec(pathname);
-    if (!match) return null;
-    const file = path.resolve(PROJECT_ROOT, '.dsh-tmp', match[1]);
-    if (!file.startsWith(path.join(PROJECT_ROOT, '.dsh-tmp') + path.sep)) return null;
-    try {
-      return await fs.readFile(file, 'utf8');
-    } catch {
-      return null;
-    }
   }
 }
 

@@ -81,6 +81,7 @@ const app = {
   rafId: 0,
   /** contest second the board was last painted at (1 Hz cadence) */
   lastBoardSec: -1,
+  lastPendingSec: -1,
   /** start time carried over from the URL until the timeline is loaded */
   pendingStartAt: null,
   /** playback speed carried over from the URL */
@@ -481,6 +482,7 @@ function enterBoard() {
     + '封榜时榜单切换为 ICPC 封榜样式：题号全部可见，未出结果的提交显示为蓝色的 ?。';
   showView('board');
   app.lastBoardSec = -1;
+  app.lastPendingSec = -1;
 }
 
 // ------------------------------------------------------------------- loop
@@ -594,11 +596,15 @@ function renderBoard(frame) {
     : `共 ${frame.rows.length} 队 · 题目 ${revealedCount}/${stats.solved.length} 已显示`
       + ` · 榜单截至 ${formatClock(frame.boardSec)}`;
 
-  // Repaint the board only when the board second actually changed.
+  // Repaint when the board second changes, or — while frozen — when a new
+  // pending second arrives, so pending submissions keep appearing live.
   if (app.board && frame.boardSec !== app.lastBoardSec) {
     app.lastBoardSec = frame.boardSec;
     app.board.render(frame);
+  } else if (app.board && frame.pendingSec !== app.lastPendingSec) {
+    app.board.render(frame);
   }
+  app.lastPendingSec = frame.pendingSec;
 }
 
 // ------------------------------------------------------------- interactions
@@ -637,6 +643,7 @@ el.btnChange.addEventListener('click', () => {
   el.badgeFreeze.hidden = true;
   el.badgePhase.textContent = '准备中';
   app.lastBoardSec = -1;
+  app.lastPendingSec = -1;
 });
 
 el.btnPause.addEventListener('click', () => {

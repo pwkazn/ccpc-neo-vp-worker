@@ -33,6 +33,74 @@ function countOfficial(state) {
 }
 
 /**
+ * Cumulative per-team, per-problem submission counts at contest second `limit`.
+ *
+ * A frozen ranklist still shows *that* a team submitted — it just withholds the
+ * result. So while the board's contents are pinned to the freeze second, the
+ * number of pending submissions keeps growing in real time. This builds the
+ * tally that makes that possible.
+ *
+ * @param {object} timeline
+ * @param {number} limit contest second (inclusive)
+ * @returns {Int32Array} length = teams * problems, indexed team * problems + p
+ */
+export function submissionCountsAt(timeline, limit) {
+  const teams = timeline.teams.length;
+  const problems = timeline.problems.length;
+  const counts = new Int32Array(teams * problems);
+  const solved = new Uint8Array(teams * problems);
+  const capped = Math.max(0, Math.floor(limit));
+
+  for (const event of timeline.events) {
+    const tSec = event[0];
+    if (tSec > capped) break;
+    const key = event[1] * problems + event[2];
+    // Rule 4: submissions after a team's AC are ignored, so they are not
+    // pending either.
+    if (solved[key]) continue;
+    counts[key] += 1;
+    if (event[3] === 1 || event[3] === 2) solved[key] = 1; // AC | FB
+  }
+
+  return counts;
+}
+
+/**
+ * Distinct submitting teams per problem at contest second `limit`.
+ *
+ * The header shows "accepted / submitted"; while frozen the accepted figure is
+ * pinned but the submitted figure keeps growing, so it needs its own live tally.
+ *
+ * @param {object} timeline
+ * @param {number} limit
+ * @param {boolean[]|null} [counted] which teams participate (null = all)
+ * @returns {Int32Array} length = problems
+ */
+export function submittedTeamsAt(timeline, limit, counted = null) {
+  const problems = timeline.problems.length;
+  const teams = timeline.teams.length;
+  const perProblem = new Int32Array(problems);
+  const seen = new Uint8Array(teams * problems);
+  const solved = new Uint8Array(teams * problems);
+  const capped = Math.max(0, Math.floor(limit));
+
+  for (const event of timeline.events) {
+    if (event[0] > capped) break;
+    const [tSec, teamIdx, probIdx, code] = event;
+    const key = teamIdx * problems + probIdx;
+    if (counted && !counted[teamIdx]) continue;
+    if (solved[key]) continue; // rule 4: ignored after the AC
+    if (!seen[key]) {
+      seen[key] = 1;
+      perProblem[probIdx] += 1;
+    }
+    if (code === 1 || code === 2) solved[key] = 1;
+  }
+
+  return perProblem;
+}
+
+/**
  * Build a frame from scratch at a given contest second.
  * Convenient for tests and one-off queries; the live UI uses `createEpochReplay`.
  *
@@ -109,6 +177,17 @@ export function createEpochReplay(timeline, options = {}) {
   let currentIndex = last.index;
   let currentSec = last.tSec;
 
+  /** memo for `liveSubmissionsAt` */
+  let liveCache = null;
+  let liveCacheSec = -1;
+  /** memo for `submittedTeamsAt` */
+  let submittedCache = null;
+  let submittedCacheSec = -1;
+  /** official-only filter, when the reveal scope asks for it */
+  const countedTeams = revealScope === 'official'
+    ? timeline.teams.map((team) => team.official !== false)
+    : null;
+
   /** Index of the latest snapshot whose tSec is <= `tSec`. */
   function findSnapshot(tSec) {
     let low = 0;
@@ -158,6 +237,29 @@ export function createEpochReplay(timeline, options = {}) {
     get currentSec() { return currentSec; },
 
     seekTo,
+
+    /**
+     * Cumulative team/problem submission counts up to `tSec`, cached by second.
+     *
+     * Used while frozen: the board's *results* stay pinned, but the pending
+     * submission tally keeps advancing live.
+     */
+    liveSubmissionsAt(tSec) {
+      const limit = Math.max(0, Math.floor(tSec));
+      if (liveCache && liveCacheSec === limit) return liveCache;
+      liveCache = submissionCountsAt(timeline, limit);
+      liveCacheSec = limit;
+      return liveCache;
+    },
+
+    /** Distinct submitting teams per problem up to `tSec`. */
+    submittedTeamsAt(tSec) {
+      const limit = Math.max(0, Math.floor(tSec));
+      if (submittedCache && submittedCacheSec === limit) return submittedCache;
+      submittedCache = submittedTeamsAt(timeline, limit, countedTeams);
+      submittedCacheSec = limit;
+      return submittedCache;
+    },
 
     /** Live per-problem status at `tSec` (does not seek). */
     statsAt(tSec) {

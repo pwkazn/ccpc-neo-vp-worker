@@ -25,16 +25,15 @@ export const REVEAL_MIN = 50;
  * The alias of a problem is revealed once the number of distinct teams that
  * solved it reaches `threshold`.
  *
- * NOTE ON THE FORMULA: the rule is the *smaller* of "floor(20% of the ranked
- * teams)" and 50 — i.e. the 50-team figure is an upper bound that keeps small
- * contests from never revealing anything, while a hypothetically huge field
- * still reveals at 50 solves. An earlier revision of this tool used `max`,
- * which was wrong.
+ * The rule is the *smaller* of "floor(20% of the ranked teams)" and 50: the
+ * 50-team figure is an upper bound, so a hypothetical huge field still reveals
+ * at 50 solves while small contests reveal proportionally.
+ *
+ * The outer `max(1, ...)` is a practical floor — with fewer than 10 ranked teams
+ * `floor(20%)` is 0, and a threshold of 0 would mean "revealed before anyone
+ * solved it".
  */
 export function revealThreshold(teamsRanked, ratio = REVEAL_RATIO, min = REVEAL_MIN) {
-  // The outer max(1, ...) is a practical floor: with fewer than 10 ranked teams
-  // floor(20%) is 0, and a threshold of 0 would mean "revealed before anyone
-  // solved it". A problem always needs at least one solver.
   return Math.max(1, Math.min(Math.floor(teamsRanked * ratio), min));
 }
 

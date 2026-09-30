@@ -5,6 +5,7 @@
   "description": "CCPC 新赛制实时榜单模拟器 —— 基于 RankLand 历史榜单数据的虚拟参赛 (VP) 回放工具",
   "type": "module",
   "license": "MIT",
+  "author": "DeepSeek-V4.1-Flash via DeepSeek Harness",
   "engines": {
     "node": ">=20.0.0"
   },

@@ -63,7 +63,6 @@
 
             meta = with pkgs.lib; {
               description = "CCPC 新赛制实时榜单模拟器（RankLand 数据回放）";
-              homepage = "https://github.com/";
               license = licenses.mit;
               mainProgram = "ccpc-neo-vp";
               platforms = platforms.unix;

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="description" content="CCPC 新赛制实时榜单模拟器 —— 基于 RankLand 榜单数据的虚拟参赛回放">
+<title>CCPC Neo VP</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%232f6feb'/><text x='16' y='23' font-size='18' text-anchor='middle' fill='white' font-family='monospace'>V</text></svg>">
+<link rel="stylesheet" href="/app/ui.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__left">
+    <span class="brand">CCPC&nbsp;<em>Neo</em>&nbsp;VP</span>
+    <span id="contest-name" class="contest-name">未选择比赛</span>
+  </div>
+  <div class="topbar__right">
+    <span id="badge-phase" class="badge">准备中</span>
+    <span id="badge-freeze" class="badge badge--warn" hidden>已封榜</span>
+    <span id="badge-coverage" class="badge badge--warn" hidden title="该场榜单数据不含逐条提交时间轴，题目排序规则已降级">排序降级</span>
+    <button id="btn-settings" class="btn btn--ghost" type="button">设置</button>
+    <button id="btn-change" class="btn btn--ghost" type="button">换一场</button>
+  </div>
+</header>
+
+<nav id="player" class="player" hidden>
+  <div class="player__clock">
+    <span class="player__label">比赛时间</span>
+    <strong id="clock-contest">0:00:00</strong>
+    <span id="clock-total" class="player__total">/ 0:00:00</span>
+  </div>
+  <div class="player__progress">
+    <input id="seek" class="seek" type="range" min="0" max="100" step="1" value="0" aria-label="拖动时间轴">
+    <div class="progress-info">
+      <span id="clock-wall" class="muted">--:--:--</span>
+      <span id="player-status" class="muted"></span>
+    </div>
+  </div>
+  <div class="player__controls">
+    <button id="btn-pause" class="btn" type="button">暂停</button>
+    <span class="speed" role="group" aria-label="倍速">
+      <button class="btn btn--chip is-active" data-speed="1" type="button">1x</button>
+      <button class="btn btn--chip" data-speed="2" type="button">2x</button>
+      <button class="btn btn--chip" data-speed="5" type="button">5x</button>
+      <button class="btn btn--chip" data-speed="10" type="button">10x</button>
+      <button class="btn btn--chip" data-speed="60" type="button">60x</button>
+      <button class="btn btn--chip" data-speed="300" type="button">300x</button>
+    </span>
+    <button id="btn-live" class="btn btn--ghost" type="button">回到实时</button>
+    <button id="btn-reveal" class="btn btn--ghost" type="button" hidden>揭榜</button>
+  </div>
+</nav>
+
+<section id="filterbar" class="filterbar" hidden>
+  <input id="team-filter" class="input" type="search" placeholder="筛选队伍 / 学校（高亮显示）" autocomplete="off">
+  <label class="switch">
+    <input id="official-only" type="checkbox" checked>
+    <span>仅官方队伍参与排名</span>
+  </label>
+  <span id="board-summary" class="muted"></span>
+</section>
+
+<main id="view-picker" class="view view--picker">
+  <form id="setup" class="setup" autocomplete="off">
+    <h1>开始一场 VP</h1>
+    <p class="setup__hint">
+      从 RankLand 选择一场比赛，设定开赛时刻，倒计时结束后即可看到按真实提交时间轴
+      生成的实时榜单。做题请自行在 QOJ / 牛客 等平台进行。
+    </p>
+
+    <label class="field">
+      <span class="field__label">比赛</span>
+      <input id="contest-search" class="input" type="search" placeholder="搜索比赛名称或 uk（例如 ccpc2026preliminary）" autocomplete="off">
+      <span class="field__hint" id="contest-hint">正在加载比赛列表…</span>
+    </label>
+
+    <ul id="contest-list" class="contest-list" role="listbox" aria-label="比赛列表"></ul>
+
+    <div class="field-row">
+      <label class="field">
+        <span class="field__label">开赛方式</span>
+        <select id="start-mode" class="input">
+          <option value="delay">倒计时后开赛</option>
+          <option value="absolute">指定绝对时刻</option>
+        </select>
+      </label>
+
+      <label class="field" id="field-delay">
+        <span class="field__label">倒计时</span>
+        <select id="start-delay" class="input">
+          <option value="5">5 秒后</option>
+          <option value="15">15 秒后</option>
+          <option value="60" selected>1 分钟后</option>
+          <option value="300">5 分钟后</option>
+          <option value="600">10 分钟后</option>
+        </select>
+      </label>
+
+      <label class="field" id="field-absolute" hidden>
+        <span class="field__label">开赛时刻</span>
+        <input id="start-absolute" class="input" type="datetime-local">
+      </label>
+    </div>
+
+    <div class="field-row">
+      <label class="field">
+        <span class="field__label">封榜模式</span>
+        <select id="freeze-mode" class="input">
+          <option value="auto" selected>自动（复刻现场，最后 1 小时封榜，结束揭榜）</option>
+          <option value="never">关闭封榜（全程真实）</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field__label">题号门限统计范围</span>
+        <select id="reveal-scope" class="input">
+          <option value="all" selected>全部队伍（20%，最少 50 队）</option>
+          <option value="official">仅官方队伍（20%，最少 50 队）</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="setup-error" class="error" hidden></div>
+
+    <button id="btn-start" class="btn btn--primary" type="submit" disabled>加载并开始</button>
+  </form>
+
+  <aside class="setup-aside">
+    <h2>新赛制要点</h2>
+    <ol>
+      <li>比赛结束前 1 小时封榜；封榜前榜单仍显示 AC 数、总罚时与各题提交情况。</li>
+      <li>题目别名在「过题队伍数达到 <code>max(⌊队数 × 20%⌋, 50)</code>」时才显示在榜单上。</li>
+      <li>每支队伍列的题目顺序并不相同：
+        <br>① 已显示题号的题按题号升序；
+        <br>② 其余中该队已 AC 的按 AC 时刻升序；
+        <br>③ 其余中提交过的按最晚提交时刻升序；
+        <br>④ 从未提交的按题号升序排在最后（同样不显示题号）。
+      </li>
+      <li>AC 之后对该题的再次提交被忽略，不计入提交次数，也不影响顺序。</li>
+    </ol>
+    <p class="muted">本工具仅个人学习使用，数据来自 RankLand 公开接口。</p>
+  </aside>
+</main>
+
+<main id="view-countdown" class="view view--countdown" hidden>
+  <div class="countdown">
+    <p class="countdown__label">距离开始</p>
+    <p id="countdown-value" class="countdown__value">0:00</p>
+    <p id="countdown-meta" class="countdown__meta muted"></p>
+    <div class="countdown__actions">
+      <button id="btn-countdown-skip" class="btn" type="button">立即开始</button>
+      <button id="btn-countdown-cancel" class="btn btn--ghost" type="button">取消</button>
+    </div>
+  </div>
+</main>
+
+<main id="view-board" class="view view--board" hidden>
+  <div id="board" class="board" role="region" aria-label="实时榜单"></div>
+</main>
+
+<footer class="footer">
+  <span id="footer-source" class="muted"></span>
+  <span class="muted">· 数据来源 RankLand（rank.ac）· 非官方工具</span>
+</footer>
+
+<dialog id="settings-dialog" class="dialog">
+  <form method="dialog" class="dialog__body">
+    <h2>设置</h2>
+    <label class="field">
+      <span class="field__label">封榜模式</span>
+      <select id="settings-freeze" class="input">
+        <option value="auto">自动（按榜单冻结时长）</option>
+        <option value="never">关闭封榜（全程真实）</option>
+      </select>
+    </label>
+    <label class="field">
+      <span class="field__label">题号门限统计范围</span>
+      <select id="settings-scope" class="input">
+        <option value="all">全部队伍</option>
+        <option value="official">仅官方队伍</option>
+      </select>
+    </label>
+    <p id="settings-info" class="muted"></p>
+    <menu class="dialog__actions">
+      <button value="close" class="btn btn--primary" type="submit">关闭</button>
+    </menu>
+  </form>
+</dialog>
+
+<script type="module" src="/app/app.mjs"></script>
+</body>
+</html>

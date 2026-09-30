@@ -1,0 +1,37 @@
+{
+  "type": "general",
+  "version": "0.3.13",
+  "contest": {
+    "title": "Legacy Fixture",
+    "startAt": "2018-11-04T09:00:00+08:00",
+    "duration": [300, "min"],
+    "frozenDuration": [60, "min"]
+  },
+  "problems": [{ "alias": "A" }, { "alias": "B" }],
+  "sorter": {
+    "algorithm": "ICPC",
+    "config": {
+      "penalty": [20, "min"],
+      "noPenaltyResults": ["FB", "AC", "?", "NOUT", "CE", "UKE", null],
+      "timePrecision": "min"
+    }
+  },
+  "rows": [
+    {
+      "user": { "id": "1", "name": "Legacy One", "official": true },
+      "score": { "value": 1, "time": [1400, "min"] },
+      "statuses": [
+        { "result": "AC", "tries": 3, "time": [1400, "s"] },
+        { "result": "RJ", "tries": 2, "time": [900, "s"] }
+      ]
+    },
+    {
+      "user": { "id": "2", "name": "Legacy Two", "official": true },
+      "score": { "value": 1, "time": [600, "min"] },
+      "statuses": [
+        { "result": "AC", "tries": 1, "time": [600, "s"] },
+        { "result": null, "tries": 0, "time": [10, "s"] }
+      ]
+    }
+  ]
+}

@@ -272,6 +272,10 @@ export function buildTimeline(ranklist, meta = {}) {
       accepted: Number.isFinite(problem.statistics?.accepted)
         ? problem.statistics.accepted
         : null,
+      // NOTE: `accepted` above is the published snapshot and is only used as a
+      // display label. The reveal rule keys off the live distinct-solver count
+      // derived from `events`, which can legitimately differ from the published
+      // number (see docs/rules.md).
       submitted: Number.isFinite(problem.statistics?.submitted)
         ? problem.statistics.submitted
         : null,

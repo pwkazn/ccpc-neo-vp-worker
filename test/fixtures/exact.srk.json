@@ -1,0 +1,93 @@
+{
+  "type": "general",
+  "version": "0.3.13",
+  "contest": {
+    "title": { "zh-CN": "夹具赛", "fallback": "Fixture Contest" },
+    "startAt": "2026-01-01T09:00:00+08:00",
+    "duration": [300, "min"],
+    "frozenDuration": [60, "min"],
+    "refLinks": [{ "link": "https://example.invalid/board", "title": "原始榜单" }]
+  },
+  "problems": [
+    {
+      "alias": "A",
+      "title": "Alpha Problem",
+      "link": "https://example.invalid/A",
+      "style": { "backgroundColor": "#ff0000" },
+      "statistics": { "accepted": 2, "submitted": 4 }
+    },
+    {
+      "alias": "B",
+      "title": "Beta Problem",
+      "link": "https://example.invalid/B",
+      "style": { "backgroundColor": "#00ff00" },
+      "statistics": { "accepted": 1, "submitted": 2 }
+    }
+  ],
+  "series": [{ "title": "#", "rule": { "preset": "ICPC" } }],
+  "sorter": {
+    "algorithm": "ICPC",
+    "config": {
+      "penalty": [20, "min"],
+      "noPenaltyResults": ["FB", "AC", "?", "NOUT", "CE", "UKE", null],
+      "timePrecision": "min",
+      "rankingTimePrecision": "min"
+    }
+  },
+  "markers": [{ "id": "female", "label": "女队", "style": "pink" }],
+  "rows": [
+    {
+      "user": {
+        "id": "1",
+        "name": "Alpha",
+        "organization": "Team One",
+        "official": true,
+        "teamMembers": [{ "name": "a1" }, { "name": "a2" }, { "name": "a3" }]
+      },
+      "score": { "value": 1, "time": [1810, "min"] },
+      "statuses": [
+        {
+          "result": "AC",
+          "tries": 1,
+          "time": [600, "s"],
+          "solutions": [{ "result": "AC", "time": [600, "s"] }]
+        },
+        {
+          "result": null,
+          "tries": 2,
+          "time": [1200, "s"],
+          "solutions": [
+            { "result": "WA", "time": [1000, "s"] },
+            { "result": "TLE", "time": [1200, "s"] }
+          ]
+        }
+      ]
+    },
+    {
+      "user": {
+        "id": "2",
+        "name": "Beta",
+        "organization": "Team Two",
+        "official": false,
+        "teamMembers": [{ "name": "b1" }]
+      },
+      "score": { "value": 1, "time": [5400, "min"] },
+      "statuses": [
+        {
+          "result": "RJ",
+          "tries": 1,
+          "solutions": [{ "result": "CE", "time": [3600, "s"] }]
+        },
+        {
+          "result": "AC",
+          "tries": 2,
+          "time": [5400, "s"],
+          "solutions": [
+            { "result": "WA", "time": [5000, "s"] },
+            { "result": "AC", "time": [5400, "s"] }
+          ]
+        }
+      ]
+    }
+  ]
+}

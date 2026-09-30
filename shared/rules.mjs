@@ -298,16 +298,18 @@ export function computeBoard(state, tSec, reveal, options = {}) {
   const ranked = rows.filter((row) => row.official);
   ranked.sort(compareRows);
 
-  let rank = 0;
-  let previous = null;
-  for (const row of ranked) {
-    if (previous && compareRows(previous, row) === 0) {
+  // Competition ranking (1, 1, 3, ...): tied rows share the rank of the first
+  // row in their tie group, and the following rank skips accordingly.
+  for (let index = 0; index < ranked.length; index++) {
+    const row = ranked[index];
+    const previous = index > 0 ? ranked[index - 1] : null;
+    // Ties are determined by score alone (solved count + total penalty); the
+    // last-AC breaker only orders rows that would otherwise tie.
+    if (previous && previous.solved === row.solved && previous.penalty === row.penalty) {
       row.rank = previous.rank;
     } else {
-      rank++;
-      row.rank = rank;
+      row.rank = index + 1;
     }
-    previous = row;
   }
 
   for (const row of rows) {

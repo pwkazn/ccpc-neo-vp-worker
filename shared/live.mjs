@@ -63,6 +63,8 @@ export function createSession(timeline, options = {}) {
     revealed: false,
 
     epoch: createEpochReplay(timeline, { revealScope: options.revealScope }),
+    /** bumped whenever a mode change must invalidate the memoised frame */
+    revision: 0,
     lastVisibleSec: -1,
     frame: null,
   };
@@ -157,29 +159,24 @@ export function createSession(timeline, options = {}) {
       reveal: session.epoch.reveal,
       detached: session.detached,
       speed: session.speed,
+      revision: session.revision,
     };
     return session.frame;
   };
 
   /**
    * Advance the session to the current wall clock.
-   * Recomputes only when the visible contest second or a mode flag changed.
+   * Recomputes only when the visible contest second or the revision changed.
    * @returns {object} the current frame
    */
   session.update = function update(now = Date.now()) {
     session.now = now;
     const contestSec = currentSec();
-    const freeze = session.freezeState();
-    const visibleSec = Math.max(0, Math.floor(freeze.visibleSec));
-    const revealed = session.isRevealed();
+    const visibleSec = Math.max(0, Math.floor(session.freezeState().visibleSec));
 
     const stale = session.frame === null
       || visibleSec !== session.lastVisibleSec
-      || session.frame.frozen !== freeze.frozen
-      || session.frame.revealed !== revealed
-      || session.frame.phase !== session.phase()
-      || session.frame.detached !== session.detached
-      || session.frame.speed !== session.speed;
+      || session.frame.revision !== session.revision;
 
     if (stale) return session.computeFrame();
 
@@ -192,7 +189,7 @@ export function createSession(timeline, options = {}) {
     const now = session.now;
     const sec = currentSec();
     if (session.detached) {
-      // Stay detached; playback is still controlled by the caller resuming.
+      // Stay detached; playback resumes when the caller re-attaches.
       session.atSec = sec;
       session.speed = speed;
     } else {
@@ -200,15 +197,20 @@ export function createSession(timeline, options = {}) {
       session.speed = speed;
       session.startAt = now - (sec / speed) * 1000;
     }
+    session.revision++;
     return session.update(now);
   };
 
   session.pause = function pause(now = session.now) {
-    return detach(now).update(now);
+    const result = detach(now);
+    session.revision++;
+    return result.update(now);
   };
 
   session.resume = function resume(now = Date.now()) {
-    return attach(now).update(now);
+    const result = attach(now);
+    session.revision++;
+    return result.update(now);
   };
 
   session.togglePause = function togglePause(now = Date.now()) {
@@ -220,12 +222,15 @@ export function createSession(timeline, options = {}) {
     session.atSec = Math.max(0, Math.min(contestSec, session.durationSec));
     session.detached = true;
     session.now = now;
+    session.revision++;
     return session.update(now);
   };
 
   /** Rejoin the live edge from the current contest second. */
   session.followLive = function followLive(now = Date.now()) {
-    return attach(now).update(now);
+    const result = attach(now);
+    session.revision++;
+    return result.update(now);
   };
 
   /** Set the VP start time (used for the initial countdown). */
@@ -235,31 +240,33 @@ export function createSession(timeline, options = {}) {
     session.revealed = false;
     session.now = now;
     session.lastVisibleSec = -1;
+    session.revision++;
     return session.update(now);
   };
 
   /** Unlock the authored final result. */
   session.reveal = function reveal(now = session.now) {
     session.revealed = true;
+    session.revision++;
     return session.update(now);
   };
 
   session.setFreezeMode = function setFreezeMode(mode, now = session.now) {
     session.freezeMode = mode === 'never' ? 'never' : 'auto';
-    session.lastVisibleSec = -1;
+    session.revision++;
     return session.update(now);
   };
 
   session.setOfficialOnly = function setOfficialOnly(value, now = session.now) {
     session.officialOnly = Boolean(value);
-    session.lastVisibleSec = -1;
+    session.revision++;
     return session.update(now);
   };
 
   session.setRevealScope = function setRevealScope(scope, now = session.now) {
     session.revealScope = scope === 'official' ? 'official' : 'all';
     session.epoch = createEpochReplay(session.timeline, { revealScope: session.revealScope });
-    session.lastVisibleSec = -1;
+    session.revision++;
     return session.update(now);
   };
 

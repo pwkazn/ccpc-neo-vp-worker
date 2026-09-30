@@ -59,12 +59,43 @@ nix flake check             # 跑离线测试
 --host <addr>     监听地址 (默认 127.0.0.1)
 --data-dir <dir>  缓存目录 (默认 $XDG_CACHE_HOME/ccpc-neo-vp)
 --base-url <url>  RankLand API 基地址 (默认 https://rl.algoux.cn/api/v2)
+--verbose         打印每个上游请求的详情（排查网络问题时使用）
 --clear-cache     清空缓存后退出
 --cache-info      打印缓存占用后退出
 -h, --help        帮助
 ```
 
-环境变量：`PORT`、`HOST`、`CCPC_NEO_VP_DATA_DIR`、`RL_BASE_URL`。
+环境变量：`PORT`、`HOST`、`CCPC_NEO_VP_DATA_DIR`、`RL_BASE_URL`、`RL_CONNECT_TIMEOUT_MS`、`RL_STALL_TIMEOUT_MS`。
+
+### 网络排查
+
+榜单文件约 2.5 MB，走代理/TUN 或较慢的线路时下载可能很慢。本工具**不设总时长超时**（慢不等于坏），只检测两种情况：
+
+- **连接超时**（默认 30 秒收不到响应头）
+- **读取停滞**（默认 45 秒没有新数据）
+
+两者都可以放宽后重启：
+
+```bash
+RL_CONNECT_TIMEOUT_MS=60000 RL_STALL_TIMEOUT_MS=120000 nix run . -- --verbose
+```
+
+启动时可以随时自检，它会逐步测试「比赛列表 → 文件元信息 → 榜单下载 → 时间线构建」并报告每步耗时与错误：
+
+```bash
+curl "http://127.0.0.1:5173/api/diagnose?uk=ccpc2026preliminary"
+```
+
+```jsonc
+{"steps":[
+  {"name":"listContests","ok":true,"ms":299,"contests":434,"found":true},
+  {"name":"ccpc2026preliminary.srk.json","ok":true,"ms":51,"size":2591190,"url":"…"},
+  {"name":"downloadSrk","ok":true,"ms":438,"bytes":2504556},
+  {"name":"buildTimeline","ok":true,"ms":471,"teams":2170,"problems":14,"events":30963,"exact":true}
+]}
+```
+
+页面上的「加载失败」也会带上**具体原因**（例如「连接 … 超时（30 秒内未收到响应头）」而不是含糊的 “The operation was aborted.”），并在提示里给出上面这个自检地址。
 
 ---
 
@@ -235,6 +266,12 @@ docs/rules.md        规则形式化说明与测试对照
 ---
 
 ## FAQ
+
+**点了「加载并开始」后提示「加载失败：The operation was aborted.」？**
+这是旧版本在 60 秒总时长超时下中止下载的报错，已修复：现在改成「连接超时 + 读取停滞」两个看门狗，慢速下载不再被中止，失败时会给出具体原因。若你仍看到它，请更新到最新提交后重启。
+
+**下载很慢 / 一直转圈？**
+放宽超时重启：`RL_CONNECT_TIMEOUT_MS=60000 RL_STALL_TIMEOUT_MS=120000 nix run . -- --verbose`，同时打开 `/api/diagnose?uk=<比赛>` 看是哪一步慢。榜单文件约 2.5 MB。
 
 **榜单不动 / 一直显示 0:00:00？**
 比赛时间在倒计时结束前是负数，进入倒计时页是正常的。若长时间没反应，看终端是否有报错。

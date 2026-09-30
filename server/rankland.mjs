@@ -3,39 +3,85 @@
  *
  * Only the read-only `/api/v2/public/*` endpoints are used. No credentials are
  * required and none are ever sent.
+ *
+ * Timeouts
+ * --------
+ * There is deliberately **no total-time timeout**. A large ranklist on a slow
+ * route can legitimately take minutes; the failure worth detecting is a *stall*
+ * or a *dead peer*, not a slow transfer. Every request therefore uses:
+ *
+ *   - `connectTimeoutMs`: time allowed until response headers arrive;
+ *   - `stallTimeoutMs`: time allowed between chunks once reading has begun.
+ *
+ * Both can be widened from the environment (`RL_CONNECT_TIMEOUT_MS`,
+ * `RL_STALL_TIMEOUT_MS`) when a route is unusually slow.
  */
 
 export const DEFAULT_BASE_URL = 'https://rl.algoux.cn/api/v2';
 
-/** Requests for the large SRK files need a generous timeout. */
-const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+const DEFAULT_STALL_TIMEOUT_MS = 45_000;
 const DEFAULT_RETRIES = 3;
 
+const envNumber = (name) => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+};
+
 export class RanklandError extends Error {
-  constructor(message, { status = 0, url = '', code = 'rankland_error' } = {}) {
+  constructor(message, { status = 0, url = '', code = 'rankland_error', cause } = {}) {
     super(message);
     this.name = 'RanklandError';
     this.status = status;
     this.url = url;
     this.code = code;
+    if (cause !== undefined) this.cause = cause;
   }
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Values that are worth retrying: network faults, stalls, 429 and 5xx. */
+const RETRYABLE_CODES = new Set([
+  'timeout',
+  'stalled',
+  'network_error',
+  'body_error',
+  'http_error',
+  'api_error',
+  'bad_json',
+]);
+
+const isRetryable = (error) => error instanceof RanklandError && RETRYABLE_CODES.has(error.code);
+
+/** A stable, human-readable reason for any thrown value. */
+function describeError(error) {
+  if (error instanceof RanklandError) return error.message;
+  if (error?.name === 'AbortError') return '请求被中止';
+  if (error?.name === 'TimeoutError') return '请求超时';
+  if (error?.cause?.message) return `${error.message} (${error.cause.message})`;
+  return error?.message ?? String(error);
+}
 
 /**
  * Create a RankLand API client.
  *
  * @param {object} [options]
  * @param {string} [options.baseUrl] override the API base (mirrors, tests)
- * @param {number} [options.timeoutMs]
+ * @param {number} [options.connectTimeoutMs]
+ * @param {number} [options.stallTimeoutMs]
  * @param {number} [options.retries]
  * @param {typeof fetch} [options.fetchImpl]
- * @param {(message: string) => void} [options.log]
+ * @param {(message: string) => void} [options.log] diagnostic sink
  */
 export function createRanklandClient(options = {}) {
   const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const connectTimeoutMs = options.connectTimeoutMs
+    ?? envNumber('RL_CONNECT_TIMEOUT_MS')
+    ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const stallTimeoutMs = options.stallTimeoutMs
+    ?? envNumber('RL_STALL_TIMEOUT_MS')
+    ?? DEFAULT_STALL_TIMEOUT_MS;
   const retries = options.retries ?? DEFAULT_RETRIES;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const log = options.log ?? (() => {});
@@ -44,101 +90,140 @@ export function createRanklandClient(options = {}) {
     throw new TypeError('global fetch is unavailable; Node >= 20 is required');
   }
 
+  const requestHeaders = {
+    accept: 'application/json, text/plain, */*',
+    'user-agent': 'ccpc-neo-vp/0.1 (+personal use)',
+  };
+
   /**
-   * Perform one HTTP GET with a timeout, returning the parsed JSON body.
-   * Retries transient failures with exponential backoff.
+   * Fetch and read a response body as text, arming a stall watchdog while
+   * reading. Returns the text plus the response (for status/headers).
    */
-  async function getJson(url, { retries: maxRetries = retries } = {}) {
+  async function readText(url, { method = 'GET' } = {}) {
+    const controller = new AbortController();
+    let watchdog = null;
+    let sawHeaders = false;
     let lastError = null;
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const response = await fetchImpl(url, {
-          signal: controller.signal,
-          headers: {
-            accept: 'application/json, text/plain, */*',
-            'user-agent': 'ccpc-neo-vp/0.1 (+personal use)',
-          },
+    const arm = (ms) => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        lastError = new RanklandError(
+          sawHeaders
+            ? `读取响应停滞超过 ${Math.round(ms / 1000)} 秒: ${url}`
+            : `连接 ${url} 超时（${Math.round(ms / 1000)} 秒内未收到响应头）`,
+          { url, code: sawHeaders ? 'stalled' : 'timeout' },
+        );
+        controller.abort();
+      }, ms);
+      // Do not let a pending watchdog keep the process alive.
+      watchdog.unref?.();
+    };
+
+    try {
+      arm(connectTimeoutMs);
+      const response = await fetchImpl(url, {
+        method,
+        signal: controller.signal,
+        headers: requestHeaders,
+      });
+      sawHeaders = true;
+      arm(stallTimeoutMs);
+
+      if (!response.ok) {
+        throw new RanklandError(`HTTP ${response.status} for ${url}`, {
+          status: response.status,
+          url,
+          code: response.status >= 400 && response.status < 500 && response.status !== 429
+            ? 'http_client_error'
+            : 'http_error',
         });
-
-        if (!response.ok) {
-          // 4xx other than 429 are permanent; do not burn retries on them.
-          const permanent = response.status >= 400 && response.status < 500 && response.status !== 429;
-          throw new RanklandError(
-            `HTTP ${response.status} for ${url}`,
-            { status: response.status, url, code: permanent ? 'http_client_error' : 'http_error' },
-          );
-        }
-
-        const body = await response.json();
-        if (body && typeof body === 'object' && body.success === false) {
-          throw new RanklandError(
-            `RankLand reported failure for ${url}: ${body.message ?? body.code ?? 'unknown'}`,
-            { status: response.status, url, code: 'api_error' },
-          );
-        }
-        return body;
-      } catch (error) {
-        lastError = error;
-        const permanent = error instanceof RanklandError && error.code === 'http_client_error';
-        if (permanent || attempt === maxRetries) break;
-        const backoff = 400 * 2 ** attempt;
-        log(`retrying ${url} after ${error.message} (attempt ${attempt + 2}/${maxRetries + 1})`);
-        await sleep(backoff);
-      } finally {
-        clearTimeout(timer);
       }
-    }
 
-    if (lastError instanceof RanklandError) throw lastError;
-    throw new RanklandError(
-      `request failed for ${url}: ${lastError?.message ?? 'unknown error'}`,
-      { url, code: 'network_error' },
-    );
+      let text;
+      if (response.body && typeof response.body.getReader === 'function') {
+        const reader = response.body.getReader();
+        const chunks = [];
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          arm(stallTimeoutMs);
+          if (value) chunks.push(value);
+        }
+        text = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
+      } else {
+        text = await response.text();
+      }
+      return { text, response };
+    } catch (error) {
+      if (error instanceof RanklandError) throw error;
+      // The watchdog aborted us: report the concrete reason, not "aborted".
+      if (lastError) throw lastError;
+      throw new RanklandError(`无法访问 ${url}: ${describeError(error)}`, {
+        url,
+        code: 'network_error',
+        cause: error,
+      });
+    } finally {
+      if (watchdog) clearTimeout(watchdog);
+    }
   }
 
-  /** Download a text resource (the SRK files are plain JSON on a CDN). */
+  /** GET + JSON parse, applied with retry/backoff. */
+  async function getJson(url, { retries: maxRetries = retries } = {}) {
+    return withRetry(url, maxRetries, async () => {
+      const { text } = await readText(url);
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch (error) {
+        throw new RanklandError(`响应不是合法 JSON: ${error.message}`, {
+          url,
+          code: 'bad_json',
+          cause: error,
+        });
+      }
+      if (body && typeof body === 'object' && body.success === false) {
+        throw new RanklandError(
+          `RankLand 返回失败: ${body.message ?? body.code ?? 'unknown'}`,
+          { url, code: 'api_error' },
+        );
+      }
+      return body;
+    });
+  }
+
+  /** GET + text, applied with retry/backoff. */
   async function getText(url, { retries: maxRetries = 2 } = {}) {
+    return withRetry(url, maxRetries, async () => (await readText(url)).text);
+  }
+
+  /** Retry `worker` on retryable failures with exponential backoff. */
+  async function withRetry(url, maxRetries, worker) {
     let lastError = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const response = await fetchImpl(url, {
-          signal: controller.signal,
-          headers: {
-            accept: 'application/json, text/plain, */*',
-            'user-agent': 'ccpc-neo-vp/0.1 (+personal use)',
-          },
-        });
-        if (!response.ok) {
-          throw new RanklandError(`HTTP ${response.status} for ${url}`, {
-            status: response.status,
-            url,
-            code: response.status === 404 ? 'not_found' : 'http_error',
-          });
-        }
-        return await response.text();
+        return await worker();
       } catch (error) {
         lastError = error;
-        if (error instanceof RanklandError && error.code === 'not_found') break;
-        if (attempt === maxRetries) break;
-        await sleep(500 * 2 ** attempt);
-      } finally {
-        clearTimeout(timer);
+        if (!isRetryable(error) || attempt === maxRetries) break;
+        const backoff = 400 * 2 ** attempt;
+        log(`${describeError(error)} — ${Math.round(backoff / 1000)} 秒后重试 (${attempt + 2}/${maxRetries + 1})`);
+        await sleep(backoff);
       }
     }
     if (lastError instanceof RanklandError) throw lastError;
-    throw new RanklandError(`failed to download ${url}: ${lastError?.message}`, {
+    throw new RanklandError(`请求失败: ${describeError(lastError)}`, {
       url,
       code: 'network_error',
+      cause: lastError,
     });
   }
 
   return {
     baseUrl,
+    connectTimeoutMs,
+    stallTimeoutMs,
 
     /** @returns {Promise<Array<object>>} every contest that has a ranklist */
     async listContests() {
@@ -178,14 +263,18 @@ export function createRanklandClient(options = {}) {
      * @returns {Promise<{ranklist: object, text: string}>}
      */
     async fetchSrk(url) {
+      const started = Date.now();
       const text = await getText(url, { retries: 2 });
+      const seconds = ((Date.now() - started) / 1000).toFixed(1);
+      log(`下载榜单 ${url} 完成: ${(text.length / 1024).toFixed(0)} KiB / ${seconds}s`);
       let ranklist;
       try {
         ranklist = JSON.parse(text);
       } catch (error) {
-        throw new RanklandError(`ranklist is not valid JSON: ${error.message}`, {
+        throw new RanklandError(`榜单文件不是合法 JSON: ${error.message}`, {
           url,
           code: 'bad_json',
+          cause: error,
         });
       }
       return { ranklist, text };

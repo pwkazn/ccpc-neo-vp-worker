@@ -29,12 +29,20 @@ const HELP = `ccpc-neo-vp —— CCPC 新赛制实时榜单模拟器
   --host <addr>     监听地址 (默认 127.0.0.1)
   --data-dir <dir>  缓存目录 (默认 $XDG_CACHE_HOME/ccpc-neo-vp)
   --base-url <url>  RankLand API 基地址 (默认 https://rl.algoux.cn/api/v2)
+  --verbose         打印每个上游请求的详情（排查网络问题时使用）
   --clear-cache     启动前清空缓存后退出
   --cache-info      打印缓存占用后退出
   -h, --help        显示本帮助
 
+排查网络问题:
+  --verbose 启动后打开 http://127.0.0.1:<port>/api/diagnose?uk=<比赛>
+  会逐步测试 比赛列表 / 文件元信息 / 榜单下载 并报告耗时与错误。
+  连接慢或读取停滞时可放宽超时:
+    RL_CONNECT_TIMEOUT_MS=60000 RL_STALL_TIMEOUT_MS=120000
+
 环境变量:
-  PORT, HOST, CCPC_NEO_VP_DATA_DIR, RL_BASE_URL
+  PORT, HOST, CCPC_NEO_VP_DATA_DIR, RL_BASE_URL,
+  RL_CONNECT_TIMEOUT_MS, RL_STALL_TIMEOUT_MS
 `;
 
 /** Parse argv into an options object. Returns { help } / { exit } for one-shot modes. */
@@ -44,6 +52,7 @@ export function parseArgs(argv) {
     host: process.env.HOST || '127.0.0.1',
     dataDir: process.env.CCPC_NEO_VP_DATA_DIR || undefined,
     baseUrl: process.env.RL_BASE_URL || undefined,
+    verbose: false,
     clearCache: false,
     cacheInfo: false,
     help: false,
@@ -63,6 +72,8 @@ export function parseArgs(argv) {
       case '--base-url': options.baseUrl = next(); break;
       case '--clear-cache': options.clearCache = true; break;
       case '--cache-info': options.cacheInfo = true; break;
+      case '-v':
+      case '--verbose': options.verbose = true; break;
       case '-h':
       case '--help': options.help = true; break;
       default:
@@ -116,7 +127,11 @@ export async function createServer(options) {
   await cache.init();
 
   const log = (message) => process.stderr.write(`[ccpc-neo-vp] ${message}\n`);
-  const rankland = createRanklandClient({ baseUrl: options.baseUrl, log });
+  const verbose = Boolean(options.verbose);
+  const debug = (message) => {
+    if (verbose) process.stderr.write(`[ccpc-neo-vp:debug] ${message}\n`);
+  };
+  const rankland = createRanklandClient({ baseUrl: options.baseUrl, log: debug });
   const assets = createStaticServer();
 
   const CONTEST_TTL_MS = 30 * 60 * 1000;
@@ -173,9 +188,11 @@ export async function createServer(options) {
     const task = (async () => {
       const { summary, meta } = await resolveSrk(uk);
       const hash = meta.hashValue ?? null;
+      debug(`${uk}: srkFileID=${summary.srkFileID} size=${meta.size} url=${meta.url}`);
 
       const cachedTimeline = await cache.readTimeline(hash);
       if (cachedTimeline && cachedTimeline.version === WIRE_VERSION) {
+        debug(`${uk}: timeline served from cache`);
         return { timeline: cachedTimeline, cached: true, stale: false, meta };
       }
 
@@ -187,14 +204,18 @@ export async function createServer(options) {
           ranklist = fetched.ranklist;
           await cache.writeSrk(hash, ranklist);
         } catch (error) {
-          throw new RanklandError(`下载榜单失败: ${error.message}`, {
+          // Preserve the concrete reason so the terminal and the UI both show
+          // *why* the download failed instead of a generic message.
+          log(`下载榜单失败 (${uk}): ${error.code ?? 'unknown'} — ${error.message}`);
+          throw new RanklandError(`下载榜单失败：${error.message}`, {
             code: 'srk_download_failed',
             status: error.status ?? 0,
             url: meta.url,
+            cause: error,
           });
         }
       } else {
-        log(`using cached SRK for ${uk}`);
+        debug(`${uk}: using cached SRK (${hash})`);
       }
 
       const timeline = buildTimeline(ranklist, {
@@ -204,6 +225,7 @@ export async function createServer(options) {
         srkUrl: meta.url,
         srkSize: meta.size,
       });
+      debug(`${uk}: built timeline with ${timeline.events.length} events (${timeline.coverage.exact ? 'exact' : 'legacy'})`);
       await cache.writeTimeline(hash, timeline);
       return { timeline, cached: false, stale, meta };
     })();
@@ -248,6 +270,78 @@ export async function createServer(options) {
           wireVersion: WIRE_VERSION,
           dataDir: cache.dataDir,
           baseUrl: rankland.baseUrl,
+          timeouts: {
+            connectMs: rankland.connectTimeoutMs,
+            stallMs: rankland.stallTimeoutMs,
+          },
+        });
+        return;
+      }
+
+      // Step-by-step upstream probe. Useful when a download fails on an
+      // unusual network route: it reports where the failure happened.
+      if (pathname === '/api/diagnose') {
+        const requested = url.searchParams.get('uk') ?? 'ccpc2026preliminary';
+        const steps = [];
+        const timeIt = async (name, fn) => {
+          const started = Date.now();
+          try {
+            const value = await fn();
+            steps.push({ name, ok: true, ms: Date.now() - started, ...value });
+          } catch (error) {
+            steps.push({
+              name,
+              ok: false,
+              ms: Date.now() - started,
+              code: error.code ?? 'error',
+              error: error.message,
+              cause: error.cause?.message ?? null,
+            });
+          }
+        };
+
+        let contestSummary = null;
+        await timeIt('listContests', async () => {
+          const { contests, stale } = await getContests({ force: true });
+          contestSummary = contests.find((contest) => contest.uk === requested) ?? null;
+          return { contests: contests.length, stale, found: Boolean(contestSummary) };
+        });
+
+        if (contestSummary?.srkFileID) {
+          let meta = null;
+          await timeIt('getFileMeta', async () => {
+            meta = await rankland.getFileMeta(contestSummary.srkFileID);
+            return { name: meta.name, size: meta.size, url: meta.url };
+          });
+
+          if (meta?.url) {
+            await timeIt('downloadSrk', async () => {
+              const { text } = await rankland.fetchSrk(meta.url);
+              return { bytes: text.length };
+            });
+            await timeIt('buildTimeline', async () => {
+              const { timeline } = await getTimeline(requested);
+              return {
+                teams: timeline.teams.length,
+                problems: timeline.problems.length,
+                events: timeline.events.length,
+                exact: timeline.coverage.exact,
+              };
+            });
+          }
+        }
+
+        sendJson(req, res, 200, {
+          success: true,
+          data: {
+            uk: requested,
+            baseUrl: rankland.baseUrl,
+            timeouts: {
+              connectMs: rankland.connectTimeoutMs,
+              stallMs: rankland.stallTimeoutMs,
+            },
+            steps,
+          },
         });
         return;
       }
@@ -323,7 +417,11 @@ export async function createServer(options) {
     } catch (error) {
       const status = error.httpStatus
         ?? (error instanceof RanklandError && error.code === 'unknown_contest' ? 404 : 502);
-      log(`error for ${req.method} ${pathname}: ${error.message}`);
+      log(`请求失败 ${req.method} ${pathname}: [${error.code ?? 'internal_error'}] ${error.message}`);
+      if (error.cause?.message) log(`  原因: ${error.cause.message}`);
+      // Keep the full trace for real faults. Client mistakes (404/400) are
+      // expected and would only add noise.
+      if (error.stack && status >= 500) log(error.stack);
       sendError(req, res, status, error.code ?? 'internal_error', error.message);
     }
   });
@@ -392,14 +490,16 @@ async function main() {
     return;
   }
 
-  const { server } = await createServer(options);
+  const { server, rankland } = await createServer(options);
   const port = await listenWithFallback(server, options.host, options.port);
   const url = `http://${options.host === '0.0.0.0' ? '127.0.0.1' : options.host}:${port}`;
   process.stdout.write(
     `ccpc-neo-vp 已启动\n`
     + `  打开: ${url}\n`
     + `  缓存: ${cache.dataDir}\n`
-    + `  数据源: ${options.baseUrl ?? 'https://rl.algoux.cn/api/v2'}\n`
+    + `  数据源: ${rankland.baseUrl}\n`
+    + `  超时: 连接 ${Math.round(rankland.connectTimeoutMs / 1000)}s / 读取停滞 ${Math.round(rankland.stallTimeoutMs / 1000)}s\n`
+    + `  自检: ${url}/api/diagnose?uk=ccpc2026preliminary\n`
     + `  (Ctrl+C 退出)\n`,
   );
 

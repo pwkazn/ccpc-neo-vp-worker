@@ -107,11 +107,15 @@ async function fetchTimeline(uk) {
   });
   if (!response.ok) {
     let detail = `HTTP ${response.status}`;
+    let code = null;
     try {
       const body = await response.json();
       if (body?.error?.message) detail = body.error.message;
-    } catch { /* ignore */ }
-    throw new Error(detail);
+      if (body?.error?.code) code = body.error.code;
+    } catch { /* keep the status text */ }
+    const error = new Error(detail);
+    error.code = code;
+    throw error;
   }
 
   const encoding = response.headers.get('content-encoding') ?? '';
@@ -357,7 +361,13 @@ async function startVp() {
     syncUrl();
     enterCountdown();
   } catch (error) {
-    setError(`加载失败：${error.message}`);
+    // Surface the concrete reason plus a pointer to the diagnostic endpoint,
+    // because this failure is usually a network/route problem.
+    const parts = [`加载失败：${error.message}`];
+    if (error.code) parts.push(`（${error.code}）`);
+    parts.push('—— 可打开 /api/diagnose?uk=' + encodeURIComponent(app.selectedUk) + ' 查看详情，'
+      + '或看服务端终端日志；若网络较慢可设置 RL_CONNECT_TIMEOUT_MS / RL_STALL_TIMEOUT_MS 后重启。');
+    setError(parts.join(' '));
   } finally {
     el.btnStart.disabled = false;
     el.btnStart.textContent = '加载并开始';

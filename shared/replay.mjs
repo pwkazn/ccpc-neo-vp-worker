@@ -4,7 +4,13 @@
  * Responsibilities:
  *   - clip the visible contest time according to the freeze configuration,
  *   - seek efficiently using periodic snapshots,
- *   - expose replayed state, reveal information and a computed board.
+ *   - expose replayed state plus the live per-problem status and a board.
+ *
+ * The per-problem status (live solve count, alias reveal, row-header order) is
+ * derived from the replayed state at the displayed second, never from published
+ * final figures. That is what makes the board behave like the real scoreboard:
+ * a problem's alias appears the moment enough teams have solved it, and the
+ * header keeps re-sorting as the solve counts change.
  */
 
 import {
@@ -12,8 +18,8 @@ import {
   cloneState,
   computeBoard,
   createState,
+  problemStatus,
   replayTo,
-  resolveReveal,
 } from './rules.mjs';
 
 /**
@@ -26,15 +32,17 @@ import {
  * @param {'all'|'official'} [options.revealScope]
  * @param {ArrayLike<number>} [options.triesFallback]
  * @param {boolean} [options.officialOnly]
+ * @param {number} [options.ratio]
+ * @param {number} [options.min]
  */
 export function frameAt(timeline, tSec, options = {}) {
-  const reveal = resolveReveal(timeline, options.revealScope ?? 'all');
-  const { state } = replayTo(timeline, tSec);
-  const { rows, officialTeams } = computeBoard(state, tSec, reveal, {
+  const { state } = replayTo(timeline, tSec, { revealScope: options.revealScope });
+  const stats = problemStatus(state, tSec, { ratio: options.ratio, min: options.min });
+  const { rows, officialTeams } = computeBoard(state, tSec, stats, {
     triesFallback: options.triesFallback ?? timeline.triesFallback ?? null,
     officialOnly: options.officialOnly,
   });
-  return { tSec, state, reveal, rows, officialTeams };
+  return { tSec, state, stats, rows, officialTeams };
 }
 
 /**
@@ -49,26 +57,28 @@ export function frameAt(timeline, tSec, options = {}) {
  * @param {object} [options]
  * @param {number} [options.snapshotIntervalSec]
  * @param {'all'|'official'} [options.revealScope]
+ * @param {number} [options.ratio]
+ * @param {number} [options.min]
  */
 export function createEpochReplay(timeline, options = {}) {
   const snapshotIntervalSec = options.snapshotIntervalSec ?? 300;
-  const revealScope = options.revealScope ?? 'all';
+  const revealScope = options.revealScope === 'official' ? 'official' : 'all';
   const triesFallback = options.triesFallback ?? timeline.triesFallback ?? null;
-  const reveal = resolveReveal(timeline, revealScope);
+  const ratio = options.ratio;
+  const min = options.min;
   const events = timeline.events;
+
+  const stateOptions = { revealScope };
 
   /** @type {Array<{state: object, index: number, tSec: number}>} ascending by tSec */
   const snapshots = [];
-  /** @type {Array<number>} shared with `snapshots` for binary search */
   let snapshotTimes = [];
 
-  // Build snapshots from a single forward pass, then reuse the final state as
-  // the starting point for the live state.
+  // One forward pass builds every snapshot; the final state becomes live.
   {
-    const writer = createState(timeline);
-    let lastSnapshotSec = -Infinity;
+    const writer = createState(timeline, stateOptions);
+    let lastSnapshotSec = 0;
     snapshots.push({ state: cloneState(writer), index: 0, tSec: 0 });
-    lastSnapshotSec = 0;
 
     for (let i = 0; i < events.length; i++) {
       const event = events[i];
@@ -82,9 +92,10 @@ export function createEpochReplay(timeline, options = {}) {
     snapshotTimes = snapshots.map((snapshot) => snapshot.tSec);
   }
 
-  let current = cloneState(snapshots[snapshots.length - 1].state);
-  let currentIndex = snapshots[snapshots.length - 1].index;
-  let currentSec = snapshots[snapshots.length - 1].tSec;
+  const last = snapshots[snapshots.length - 1];
+  let current = cloneState(last.state);
+  let currentIndex = last.index;
+  let currentSec = last.tSec;
 
   /** Index of the latest snapshot whose tSec is <= `tSec`. */
   function findSnapshot(tSec) {
@@ -123,14 +134,12 @@ export function createEpochReplay(timeline, options = {}) {
       index++;
     }
     currentIndex = index;
-    // `currentSec` tracks the last applied event; keep the requested time for
-    // callers that ask for it explicitly.
     return current;
   }
 
   return {
     timeline,
-    reveal,
+    revealScope,
     snapshotCount: snapshots.length,
 
     get state() { return current; },
@@ -138,14 +147,27 @@ export function createEpochReplay(timeline, options = {}) {
 
     seekTo,
 
-    /** Board at `tSec` (state is seeked first). */
+    /** Live per-problem status at `tSec` (does not seek). */
+    statsAt(tSec) {
+      return problemStatus(current, tSec, { ratio, min });
+    },
+
+    /** Board at `tSec` (state and stats are computed together). */
     frameAt(tSec, frameOptions = {}) {
       seekTo(tSec);
-      const { rows, officialTeams } = computeBoard(current, tSec, reveal, {
+      const stats = problemStatus(current, tSec, { ratio, min });
+      const { rows, officialTeams } = computeBoard(current, tSec, stats, {
         triesFallback,
         officialOnly: frameOptions.officialOnly,
       });
-      return { tSec, state: current, reveal, rows, officialTeams };
+      return {
+        tSec,
+        state: current,
+        stats,
+        reveal: stats,
+        rows,
+        officialTeams,
+      };
     },
 
     stats() {
@@ -168,7 +190,7 @@ export function createEpochReplay(timeline, options = {}) {
  * @param {number} params.frozenDurationSec
  * @param {'auto'|'never'} params.freezeMode `never` keeps the board live all the
  *   way to the end; `auto` freezes for the last `frozenDurationSec`.
- * @param {boolean} [params.revealed] force-unfreeze (end of the VP)
+ * @param {boolean} [params.revealed] force-unfreeze (end of the VP, or manual)
  * @returns {{ visibleSec: number, frozen: boolean, frozenAtSec: number|null, revealPending: boolean }}
  */
 export function resolveFreeze({
@@ -180,17 +202,26 @@ export function resolveFreeze({
 }) {
   const clip = (value) => Math.max(0, Math.min(value, durationSec));
   const usesFreeze = freezeMode !== 'never' && frozenDurationSec > 0;
-  const frozenAtSec = usesFreeze ? clip(durationSec - frozenDurationSec) : null;
 
-  if (!usesFreeze || revealed) {
-    return { visibleSec: clip(contestSec), frozen: false, frozenAtSec, revealPending: false };
+  // No freeze configured: the board is always live.
+  if (!usesFreeze) {
+    return { visibleSec: clip(contestSec), frozen: false, frozenAtSec: null, revealPending: false };
   }
 
+  const frozenAtSec = clip(durationSec - frozenDurationSec);
+
+  // Before the freeze starts the board is live.
   if (contestSec <= frozenAtSec) {
     return { visibleSec: clip(contestSec), frozen: false, frozenAtSec, revealPending: false };
   }
 
-  return { visibleSec: frozenAtSec, frozen: true, frozenAtSec, revealPending: true };
+  // Inside the freeze window: hold the board at the freeze second.
+  if (!revealed) {
+    return { visibleSec: frozenAtSec, frozen: true, frozenAtSec, revealPending: true };
+  }
+
+  // Unfrozen: show the true state at the real contest second.
+  return { visibleSec: clip(contestSec), frozen: false, frozenAtSec, revealPending: false };
 }
 
 /** Format seconds as `H:MM:SS`. */
@@ -207,4 +238,4 @@ export function formatPenalty(seconds) {
   return String(Math.floor(seconds / 60));
 }
 
-export { computeBoard, resolveReveal };
+export { computeBoard, problemStatus };

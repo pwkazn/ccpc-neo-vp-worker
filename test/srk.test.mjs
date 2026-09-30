@@ -154,7 +154,7 @@ test('countAcceptedPerProblem trusts published statistics when events are missin
 });
 
 test('computeReveal reveals a problem the moment the threshold is reached', () => {
-  // 5 counted teams, ratio 0.2 => floor(1.0) = 1, but min 3 raises it to 3.
+  // 5 counted teams, ratio 0.2 => floor(1.0) = 1, then min(1, 3) = 1.
   const events = [
     [100, 0, 0, RESULT.AC],
     [200, 1, 0, RESULT.AC],
@@ -170,9 +170,24 @@ test('computeReveal reveals a problem the moment the threshold is reached', () =
   });
 
   assert.equal(teamsRanked, 5);
-  assert.equal(threshold, 3);
-  assert.equal(revealSec[0], 300, 'revealed by the third distinct solver');
-  assert.equal(revealSec[1], null, 'only one solver, never revealed');
+  assert.equal(threshold, 1, 'min(floor(5*0.2), 3) = 1');
+  assert.equal(revealSec[0], 100, 'revealed by the first distinct solver');
+  assert.equal(revealSec[1], 150, 'the other problem is revealed by its first solver');
+});
+
+test('computeReveal is capped by the 50-team figure in a large field', () => {
+  const events = [];
+  for (let team = 0; team < 60; team++) events.push([100 + team, team, 0, RESULT.AC]);
+  const { threshold, revealSec, teamsRanked } = computeReveal({
+    events,
+    problemCount: 1,
+    teamCounted: new Array(1000).fill(true),
+    ratio: 0.2,
+    min: 50,
+  });
+  assert.equal(teamsRanked, 1000);
+  assert.equal(threshold, 50, 'min(200, 50) = 50, not 200');
+  assert.equal(revealSec[0], 149, 'the 50th solver arrives at t=149');
 });
 
 test('computeReveal ignores uncounted teams', () => {
@@ -255,10 +270,10 @@ test('buildTimeline exposes both reveal scopes', async () => {
   const srk = await loadFixture('exact.srk.json');
   const timeline = buildTimeline(srk, { uk: 'x', revealRatio: 0.5, revealMin: 1 });
   assert.equal(timeline.reveal.all.teamsRanked, 2);
-  assert.equal(timeline.reveal.all.threshold, 1);
+  assert.equal(timeline.reveal.all.threshold, Math.min(1, 1), 'min(floor(2*0.5), 1) = 1');
   // The fixture has one unofficial team.
   assert.equal(timeline.reveal.official.teamsRanked, 1);
-  assert.equal(timeline.reveal.official.threshold, 1);
+  assert.equal(timeline.reveal.official.threshold, Math.max(1, Math.min(0, 1)), 'floored at 1');
   assert.equal(timeline.reveal.all.revealSec[0], 600);
   assert.equal(timeline.reveal.all.revealSec[1], 1000);
 });

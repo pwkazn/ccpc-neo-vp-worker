@@ -34,7 +34,7 @@ export const SPEEDS = Object.freeze([1, 2, 5, 10, 60, 300]);
  * @param {'auto'|'never'} [options.freezeMode]
  * @param {'all'|'official'} [options.revealScope]
  * @param {boolean} [options.officialOnly] rank official teams only
- * @param {boolean} [options.autoReveal] reveal the frozen board once the contest ends
+ * @param {boolean} [options.autoReveal] unfreeze automatically once the contest ends
  * @param {number} [options.now] initial wall clock (defaults to Date.now())
  */
 export function createSession(timeline, options = {}) {
@@ -59,11 +59,10 @@ export function createSession(timeline, options = {}) {
     detached: false,
     /** contest second used while detached */
     atSec: 0,
-    /** set once the user (or the end of the contest) unlocks the final board */
+    /** set once the board is unlocked (end of contest, or manual reveal) */
     revealed: false,
 
     epoch: createEpochReplay(timeline, { revealScope: options.revealScope }),
-    /** bumped whenever a mode change must invalidate the memoised frame */
     revision: 0,
     lastVisibleSec: -1,
     frame: null,
@@ -83,8 +82,8 @@ export function createSession(timeline, options = {}) {
   }
 
   /** Detach the clock, keeping the current contest second. */
-  function detach(now = session.now) {
-    session.now = now;
+  function detach(nowSec = session.now) {
+    session.now = nowSec;
     if (!session.detached) {
       session.atSec = liveSec();
       session.detached = true;
@@ -93,11 +92,11 @@ export function createSession(timeline, options = {}) {
   }
 
   /** Re-attach the clock so playback continues from the current contest second. */
-  function attach(now = session.now) {
-    session.now = now;
+  function attach(nowSec = session.now) {
+    session.now = nowSec;
     if (session.detached) {
       const sec = session.atSec;
-      session.startAt = now - (sec / session.speed) * 1000;
+      session.startAt = nowSec - (sec / session.speed) * 1000;
       session.detached = false;
     }
     return session;
@@ -108,9 +107,8 @@ export function createSession(timeline, options = {}) {
 
   /** Freeze-aware view of the requested contest time. */
   session.freezeState = function freezeState() {
-    const contestSec = currentSec();
     return resolveFreeze({
-      contestSec,
+      contestSec: currentSec(),
       durationSec: session.durationSec,
       frozenDurationSec: session.frozenDurationSec,
       freezeMode: session.freezeMode,
@@ -118,19 +116,22 @@ export function createSession(timeline, options = {}) {
     });
   };
 
-  /** Whether the board is currently showing the authored final result. */
+  /**
+   * Whether the board is currently unlocked: either the user asked for it, or
+   * the contest ran past its end and the freeze should lift by itself.
+   */
   session.isRevealed = function isRevealed() {
     if (session.revealed) return true;
     if (!session.autoReveal) return false;
-    return currentSec() >= session.durationSec && frozenDurationSec > 0
-      && session.freezeMode !== 'never';
+    return currentSec() >= session.durationSec;
   };
 
   /** Current phase of the VP. */
   session.phase = function phase() {
     const contestSec = currentSec();
     if (contestSec < 0) return PHASE.PENDING;
-    if (session.freezeState().frozen) return PHASE.FROZEN;
+    const freeze = session.freezeState();
+    if (freeze.frozen) return PHASE.FROZEN;
     if (contestSec >= session.durationSec) return PHASE.ENDED;
     return PHASE.RUNNING;
   };
@@ -140,24 +141,29 @@ export function createSession(timeline, options = {}) {
     const contestSec = currentSec();
     const freeze = session.freezeState();
     const visibleSec = Math.max(0, Math.floor(freeze.visibleSec));
+    const revealed = session.isRevealed();
 
-    const { rows } = session.epoch.frameAt(visibleSec, {
+    const { rows, stats } = session.epoch.frameAt(visibleSec, {
       officialOnly: session.officialOnly,
     });
 
     session.lastVisibleSec = visibleSec;
     session.frame = {
+      /** wall-clock contest time (keeps advancing while frozen) */
       contestSec,
+      /** contest time actually displayed (held at the freeze second) */
       visibleSec,
       frozen: freeze.frozen,
       frozenAtSec: freeze.frozenAtSec,
       revealPending: freeze.revealPending,
-      revealed: session.isRevealed(),
+      revealed,
       phase: session.phase(),
       rows,
       state: session.epoch.state,
-      reveal: session.epoch.reveal,
-      /** legacy per-team attempt counts, for boards without an event timeline */
+      /** live per-problem solve counts, reveal flags and header order */
+      stats,
+      /** @deprecated alias kept for the board's older call sites */
+      reveal: stats,
       triesFallback: session.timeline.triesFallback ?? null,
       detached: session.detached,
       speed: session.speed,
@@ -171,8 +177,8 @@ export function createSession(timeline, options = {}) {
    * Recomputes only when the visible contest second or the revision changed.
    * @returns {object} the current frame
    */
-  session.update = function update(now = Date.now()) {
-    session.now = now;
+  session.update = function update(nowSec = Date.now()) {
+    session.now = nowSec;
     const contestSec = currentSec();
     const visibleSec = Math.max(0, Math.floor(session.freezeState().visibleSec));
 
@@ -188,7 +194,7 @@ export function createSession(timeline, options = {}) {
 
   session.setSpeed = function setSpeed(speed) {
     if (!SPEEDS.includes(speed)) return session;
-    const now = session.now;
+    const nowSec = session.now;
     const sec = currentSec();
     if (session.detached) {
       // Stay detached; playback resumes when the caller re-attaches.
@@ -197,79 +203,87 @@ export function createSession(timeline, options = {}) {
     } else {
       // Stay at the live edge but rebase so the shown second is unchanged.
       session.speed = speed;
-      session.startAt = now - (sec / speed) * 1000;
+      session.startAt = nowSec - (sec / speed) * 1000;
     }
     session.revision++;
-    return session.update(now);
+    return session.update(nowSec);
   };
 
-  session.pause = function pause(now = session.now) {
-    const result = detach(now);
+  session.pause = function pause(nowSec = session.now) {
+    const result = detach(nowSec);
     session.revision++;
-    return result.update(now);
+    return result.update(nowSec);
   };
 
-  session.resume = function resume(now = Date.now()) {
-    const result = attach(now);
+  session.resume = function resume(nowSec = Date.now()) {
+    const result = attach(nowSec);
     session.revision++;
-    return result.update(now);
+    return result.update(nowSec);
   };
 
-  session.togglePause = function togglePause(now = Date.now()) {
-    return session.detached ? session.resume(now) : session.pause(now);
+  session.togglePause = function togglePause(nowSec = Date.now()) {
+    return session.detached ? session.resume(nowSec) : session.pause(nowSec);
   };
 
   /** Jump to an absolute contest second (scrubbing); detaches the clock. */
-  session.seek = function seek(contestSec, now = session.now) {
+  session.seek = function seek(contestSec, nowSec = session.now) {
     session.atSec = Math.max(0, Math.min(contestSec, session.durationSec));
     session.detached = true;
-    session.now = now;
+    session.now = nowSec;
     session.revision++;
-    return session.update(now);
+    return session.update(nowSec);
   };
 
   /** Rejoin the live edge from the current contest second. */
-  session.followLive = function followLive(now = Date.now()) {
-    const result = attach(now);
+  session.followLive = function followLive(nowSec = Date.now()) {
+    const result = attach(nowSec);
     session.revision++;
-    return result.update(now);
+    return result.update(nowSec);
   };
 
   /** Set the VP start time (used for the initial countdown). */
-  session.setStartAt = function setStartAt(startAt, now = Date.now()) {
+  session.setStartAt = function setStartAt(startAt, nowSec = Date.now()) {
     session.startAt = startAt;
     session.detached = false;
     session.revealed = false;
-    session.now = now;
+    session.now = nowSec;
     session.lastVisibleSec = -1;
     session.revision++;
-    return session.update(now);
+    return session.update(nowSec);
   };
 
-  /** Unlock the authored final result. */
-  session.reveal = function reveal(now = session.now) {
+  /** Unlock the board (manual reveal). */
+  session.reveal = function reveal(nowSec = session.now) {
     session.revealed = true;
     session.revision++;
-    return session.update(now);
+    return session.update(nowSec);
   };
 
-  session.setFreezeMode = function setFreezeMode(mode, now = session.now) {
+  /** Re-enter the freeze, undoing a reveal (for checking the frozen view). */
+  session.unreveal = function unreveal(nowSec = session.now) {
+    session.revealed = false;
+    session.revision++;
+    return session.update(nowSec);
+  };
+
+  session.setFreezeMode = function setFreezeMode(mode, nowSec = session.now) {
     session.freezeMode = mode === 'never' ? 'never' : 'auto';
     session.revision++;
-    return session.update(now);
+    return session.update(nowSec);
   };
 
-  session.setOfficialOnly = function setOfficialOnly(value, now = session.now) {
+  session.setOfficialOnly = function setOfficialOnly(value, nowSec = session.now) {
     session.officialOnly = Boolean(value);
     session.revision++;
-    return session.update(now);
+    return session.update(nowSec);
   };
 
-  session.setRevealScope = function setRevealScope(scope, now = session.now) {
+  session.setRevealScope = function setRevealScope(scope, nowSec = session.now) {
     session.revealScope = scope === 'official' ? 'official' : 'all';
     session.epoch = createEpochReplay(session.timeline, { revealScope: session.revealScope });
+    session.lastVisibleSec = -1;
     session.revision++;
-    return session.update(now);
+    return session.update(nowSec);
   };
 
   session.frame = session.computeFrame();

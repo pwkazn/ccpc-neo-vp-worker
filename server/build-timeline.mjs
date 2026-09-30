@@ -24,6 +24,7 @@ import {
   isAccepted,
   textToString,
 } from '../shared/srk.mjs';
+import { revealThreshold } from '../shared/rules.mjs';
 
 /** Bump when the wire layout changes in an incompatible way. */
 export const WIRE_VERSION = 1;
@@ -145,7 +146,14 @@ export function countAcceptedPerProblem(ranklist, events) {
  * becomes visible on the board.
  *
  * Rule: a problem's alias is revealed once the number of distinct teams that
- * solved it reaches `max(floor(teamsRanked * ratio), min)`.
+ * solved it reaches `min(floor(teamsRanked * ratio), min)`. The 50-team figure
+ * is an upper bound, so small contests still reveal (and a hypothetical huge
+ * field would still reveal at 50).
+ *
+ * The board does not actually use these times at runtime — it re-derives the
+ * live counts per second. They are kept because they make the timeline
+ * self-describing, are asserted by the tests, and let /api/diagnose report the
+ * reveal schedule without replaying anything.
  *
  * @param {object} params
  * @param {Array<[number, number, number, number]>} params.events
@@ -153,11 +161,11 @@ export function countAcceptedPerProblem(ranklist, events) {
  * @param {boolean[]} params.teamCounted which teams participate in the count
  * @param {number} params.ratio
  * @param {number} params.min
- * @returns {{ threshold: number, revealSec: Array<number|null> }}
+ * @returns {{ threshold: number, revealSec: Array<number|null>, teamsRanked: number }}
  */
 export function computeReveal({ events, problemCount, teamCounted, ratio, min }) {
   const teamsRanked = teamCounted.reduce((acc, counted) => acc + (counted ? 1 : 0), 0);
-  const threshold = Math.max(Math.floor(teamsRanked * ratio), min);
+  const threshold = revealThreshold(teamsRanked, ratio, min);
 
   const counts = new Array(problemCount).fill(0);
   const solved = new Set();

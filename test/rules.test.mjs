@@ -3,7 +3,10 @@
  *
  * These use small hand-built timelines so every branch of the reveal,
  * column-ordering, scoring and ranking rules is asserted explicitly.
- * See docs/rules.md for the mapping to the published rule text.
+ *
+ * Reveal is *dynamic* here: nothing precomputes reveal times, so a test
+ * controls the threshold through the team count and the solve events, exactly
+ * as the live board does. See docs/rules.md for the rule text mapping.
  */
 
 import test from 'node:test';
@@ -17,9 +20,9 @@ import {
   computeBoard,
   createState,
   floorToPrecision,
-  isRevealed,
+  problemStatus,
   replayTo,
-  resolveReveal,
+  revealThreshold,
 } from '../shared/rules.mjs';
 import { frameAt, createEpochReplay, resolveFreeze, formatClock } from '../shared/replay.mjs';
 import { createSession, PHASE } from '../shared/live.mjs';
@@ -35,15 +38,13 @@ import { createSession, PHASE } from '../shared/live.mjs';
  * @param {number} [spec.frozenDurationSec]
  * @param {number} [spec.penaltySec]
  * @param {string} [spec.timePrecision]
- * @param {number[]} [spec.revealSec] explicit reveal times (Infinity allowed)
  * @param {boolean[]} [spec.official]
+ * @param {number} [spec.accepted] value reported in `problems[].accepted`
  */
 function makeTimeline(spec) {
   const teamCount = spec.teams;
   const problemCount = spec.problems;
   const official = spec.official ?? new Array(teamCount).fill(true);
-  const revealSec = spec.revealSec ?? new Array(problemCount).fill(Infinity);
-  const threshold = spec.threshold ?? teamCount;
 
   return {
     version: 1,
@@ -57,7 +58,8 @@ function makeTimeline(spec) {
       alias: String.fromCharCode(65 + i),
       title: `Problem ${i}`,
       color: null,
-      accepted: null,
+      accepted: spec.accepted ?? null,
+      submitted: null,
     })),
     teams: Array.from({ length: teamCount }, (_, i) => ({
       id: String(i),
@@ -67,17 +69,11 @@ function makeTimeline(spec) {
       members: [],
       markers: [],
     })),
-    reveal: {
-      ratio: 0.2,
-      min: 50,
-      all: { teamsRanked: teamCount, threshold, revealSec },
-      official: { teamsRanked: teamCount, threshold, revealSec },
-    },
+    reveal: { ratio: 0.2, min: 50 },
     sorter: {
       algorithm: 'ICPC',
       penaltySec: spec.penaltySec ?? 1200,
       noPenaltyResults: ['FB', 'AC', '?', 'NOUT', 'CE', 'UKE', null],
-      // Mirrors the codes RankLand actually publishes for these contests.
       noPenaltyCodes: [RESULT.FB, RESULT.AC, RESULT.UNKNOWN, RESULT.NOUT, RESULT.CE, RESULT.UKE],
       timePrecision: spec.timePrecision ?? 'min',
       rankingTimePrecision: spec.timePrecision ?? 'min',
@@ -87,6 +83,40 @@ function makeTimeline(spec) {
     coverage: { exact: true, events: spec.events.length, droppedEvents: 0, noPenaltyResults: [] },
   };
 }
+
+/** Convenience: replayed state plus live problem stats at `tSec`. */
+function replay(timeline, tSec, options = {}) {
+  const { state } = replayTo(timeline, tSec, options);
+  return { state, stats: problemStatus(state, tSec, options) };
+}
+
+// ------------------------------------------------------------- threshold rule
+
+test('revealThreshold is the smaller of floor(N * 20%) and 50', () => {
+  // Small contest: 20% is the binding constraint.
+  assert.equal(revealThreshold(10), 2);
+  assert.equal(revealThreshold(45), 9);
+  assert.equal(revealThreshold(100), 20);
+  // Large field: the 50-team figure caps it.
+  assert.equal(revealThreshold(300), 50);
+  assert.equal(revealThreshold(2170), 50);
+  // A tiny field would floor to 0, which would reveal before anyone solved it,
+  // so the threshold never drops below 1.
+  assert.equal(revealThreshold(1), 1);
+  assert.equal(revealThreshold(4), 1);
+  assert.equal(revealThreshold(0), 1);
+});
+
+test('1000-team fixture reveals at 50 solves, not 200', () => {
+  const events = [];
+  for (let team = 0; team < 60; team++) events.push([100 + team, team, 0, RESULT.AC]);
+  const timeline = makeTimeline({ teams: 1000, problems: 1, events });
+  const { stats } = replay(timeline, 9999);
+  assert.equal(stats.threshold, Math.min(Math.floor(1000 * 0.2), 50));
+  assert.equal(stats.threshold, 50);
+  assert.equal(stats.solved[0], 60);
+  assert.ok(stats.revealed[0], '60 solvers clears a threshold of 50');
+});
 
 // ------------------------------------------------------------ time precision
 
@@ -105,14 +135,13 @@ test('a solve adds floored solve time plus 20 minutes per failed attempt', () =>
   const timeline = makeTimeline({
     teams: 1,
     problems: 1,
-    // floor(600/60)=10min solve, 2 penalty-bearing failures
     events: [
       [100, 0, 0, RESULT.WA],
       [200, 0, 0, RESULT.TLE],
       [600, 0, 0, RESULT.AC],
     ],
   });
-  const { state } = replayTo(timeline, 1000);
+  const { state } = replay(timeline, 1000);
   assert.equal(state.solved[0], 1);
   assert.equal(state.penalty[0], 600 + 2 * 1200);
 });
@@ -127,7 +156,7 @@ test('no-penalty results do not count as failed attempts', () => {
       [600, 0, 0, RESULT.AC],
     ],
   });
-  const { state } = replayTo(timeline, 1000);
+  const { state } = replay(timeline, 1000);
   assert.equal(state.penalty[0], 600 + 1200, 'only the WA carries a penalty');
 });
 
@@ -137,11 +166,11 @@ test('submissions after an AC are ignored entirely (rule 4)', () => {
     problems: 1,
     events: [
       [600, 0, 0, RESULT.AC],
-      [700, 0, 0, RESULT.WA], // ignored: no try, no penalty
-      [800, 0, 0, RESULT.WA], // ignored
+      [700, 0, 0, RESULT.WA],
+      [800, 0, 0, RESULT.WA],
     ],
   });
-  const { state } = replayTo(timeline, 1000);
+  const { state } = replay(timeline, 1000);
   assert.equal(state.solved[0], 1);
   assert.equal(state.penalty[0], 600);
   assert.equal(state.subs[0], 1, 'post-AC submissions do not increase the count');
@@ -157,15 +186,12 @@ test('a second AC on the same problem is ignored', () => {
       [900, 0, 0, RESULT.AC],
     ],
   });
-  const { state } = replayTo(timeline, 1000);
-  assert.equal(state.solved[0], 1, 'one problem solved once');
+  const { state } = replay(timeline, 1000);
+  assert.equal(state.solved[0], 1);
   assert.equal(state.penalty[0], 600);
 });
 
-test('an RJ submission counts as a try but carries no penalty', () => {
-  // RJ is *not* in the SRK default noPenaltyResults list, so this is really a
-  // test of the state machine: RJ produces no penalty because RankLand gives it
-  // no submission time, exercised here through the explicit code list.
+test('an RJ submission counts as a try but carries no penalty when configured so', () => {
   const timeline = makeTimeline({
     teams: 1,
     problems: 1,
@@ -175,28 +201,10 @@ test('an RJ submission counts as a try but carries no penalty', () => {
     ],
   });
   timeline.sorter.noPenaltyCodes = [...timeline.sorter.noPenaltyCodes, RESULT.RJ];
-
-  const { state } = replayTo(timeline, 1000);
+  const { state } = replay(timeline, 1000);
   assert.equal(state.subs[0], 2, 'both submissions are visible');
   assert.equal(state.solved[0], 1);
-  const board = computeBoard(state, 1000, resolveReveal(timeline));
-  assert.equal(board.rows[0].penalty, 600, 'RJ adds no penalty time');
-});
-
-test('an RJ submission counts as a penalty-bearing try when the sorter says so', () => {
-  const timeline = makeTimeline({
-    teams: 1,
-    problems: 1,
-    events: [
-      [100, 0, 0, RESULT.RJ],
-      [600, 0, 0, RESULT.AC],
-    ],
-  });
-  timeline.sorter.noPenaltyCodes = timeline.sorter.noPenaltyCodes.filter(
-    (code) => code !== RESULT.RJ,
-  );
-  const { state } = replayTo(timeline, 1000);
-  assert.equal(state.penalty[0], 600 + 1200, 'RJ counts as a failed attempt');
+  assert.equal(state.penalty[0], 600, 'RJ adds no penalty time');
 });
 
 test('only events at or before the limit are applied', () => {
@@ -208,8 +216,8 @@ test('only events at or before the limit are applied', () => {
       [200, 0, 1, RESULT.AC],
     ],
   });
-  assert.equal(replayTo(timeline, 150).state.solved[0], 1);
-  assert.equal(replayTo(timeline, 200).state.solved[0], 2);
+  assert.equal(replay(timeline, 150).state.solved[0], 1);
+  assert.equal(replay(timeline, 200).state.solved[0], 2);
 });
 
 // ------------------------------------------------------------- ranking
@@ -219,17 +227,15 @@ test('ranking sorts by solves desc, penalty asc, then earliest last AC', () => {
     teams: 3,
     problems: 2,
     events: [
-      // team 0: 2 solves, penalty floor(600/60)+floor(1200/60)=10+20=30min
       [600, 0, 0, RESULT.AC],
       [1200, 0, 1, RESULT.AC],
-      // team 1: 2 solves, penalty 20+30=50min
       [1200, 1, 0, RESULT.AC],
       [1800, 1, 1, RESULT.AC],
-      // team 2: 1 solve
       [300, 2, 0, RESULT.AC],
     ],
   });
-  const board = computeBoard(replayTo(timeline, 9999).state, 9999, resolveReveal(timeline));
+  const { state, stats } = replay(timeline, 9999);
+  const board = computeBoard(state, 9999, stats);
   assert.deepEqual(board.rows.map((row) => row.teamIdx), [0, 1, 2]);
   assert.deepEqual(board.rows.map((row) => row.rank), [1, 2, 3]);
   assert.equal(board.rows[0].penalty, 1800, '30 minutes in seconds');
@@ -246,7 +252,8 @@ test('teams tied on solves and penalty share a rank and the next rank skips', ()
       [1200, 2, 0, RESULT.AC],
     ],
   });
-  const board = computeBoard(replayTo(timeline, 9999).state, 9999, resolveReveal(timeline));
+  const { state, stats } = replay(timeline, 9999);
+  const board = computeBoard(state, 9999, stats);
   const byTeam = new Map(board.rows.map((row) => [row.teamIdx, row.rank]));
   assert.equal(byTeam.get(0), 1);
   assert.equal(byTeam.get(1), 1, 'identical score shares the rank');
@@ -259,11 +266,12 @@ test('official:false teams are listed but never ranked', () => {
     problems: 1,
     official: [true, false],
     events: [
-      [600, 1, 0, RESULT.AC], // unofficial solves first
+      [600, 1, 0, RESULT.AC],
       [1200, 0, 0, RESULT.AC],
     ],
   });
-  const board = computeBoard(replayTo(timeline, 9999).state, 9999, resolveReveal(timeline));
+  const { state, stats } = replay(timeline, 9999);
+  const board = computeBoard(state, 9999, stats);
   assert.equal(board.officialTeams, 1);
   assert.equal(board.rows[0].teamIdx, 0, 'official teams come first');
   assert.equal(board.rows[0].rank, 1);
@@ -273,7 +281,8 @@ test('official:false teams are listed but never ranked', () => {
 
 test('an unsolved board is all zeroes and still rankable', () => {
   const timeline = makeTimeline({ teams: 2, problems: 1, events: [] });
-  const board = computeBoard(replayTo(timeline, 100).state, 100, resolveReveal(timeline));
+  const { state, stats } = replay(timeline, 100);
+  const board = computeBoard(state, 100, stats);
   assert.equal(board.rows.length, 2);
   assert.ok(board.rows.every((row) => row.solved === 0 && row.penalty === 0));
   assert.deepEqual(board.rows.map((row) => row.rank), [1, 1]);
@@ -281,153 +290,231 @@ test('an unsolved board is all zeroes and still rankable', () => {
 
 // ------------------------------------------------------- reveal (rule 1)
 
-test('isRevealed flips exactly at the reveal second', () => {
+test('a problem is revealed exactly when the live count reaches the threshold', () => {
+  // 10 teams -> floor(2) = 2, capped by min(.,50) => threshold 2.
   const timeline = makeTimeline({
-    teams: 1,
-    problems: 1,
-    events: [],
-    revealSec: [100],
+    teams: 10,
+    problems: 2,
+    events: [
+      [100, 0, 0, RESULT.AC],
+      [200, 1, 0, RESULT.AC], // count 2 -> revealed at 200
+      [300, 2, 1, RESULT.AC], // problem B only ever has one solver
+    ],
   });
-  const reveal = resolveReveal(timeline, 'all');
-  assert.ok(!isRevealed(reveal, 0, 99));
-  assert.ok(isRevealed(reveal, 0, 100));
+
+  assert.equal(problemStatus(replayTo(timeline, 100).state, 100).revealed[0], false);
+  assert.equal(problemStatus(replayTo(timeline, 199).state, 199).revealed[0], false);
+  assert.equal(problemStatus(replayTo(timeline, 200).state, 200).revealed[0], true);
+  assert.equal(problemStatus(replayTo(timeline, 9999).state, 9999).revealed[1], false,
+    'problem B never reaches the threshold');
 });
 
 test('an unrevealed problem keeps its alias hidden in cellInfo', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 2,
     events: [[100, 0, 0, RESULT.AC]],
-    revealSec: [100, Infinity],
   });
-  const { state } = replayTo(timeline, 200);
-  const reveal = resolveReveal(timeline, 'all');
-  assert.equal(cellInfo(state, 0, 0, reveal, 200).alias, 'A');
-  assert.equal(cellInfo(state, 0, 1, reveal, 200).alias, null, 'hidden alias stays null');
+  const { state, stats } = replay(timeline, 200);
+  assert.equal(cellInfo(state, 0, 0, stats, 200).alias, null, 'only 1 solve, threshold 2');
+  assert.equal(cellInfo(state, 0, 1, stats, 200).alias, null);
+});
+
+test('after enough solves the alias becomes visible', () => {
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 1,
+    events: [
+      [100, 0, 0, RESULT.AC],
+      [200, 1, 0, RESULT.AC],
+    ],
+  });
+  const { state, stats } = replay(timeline, 9999);
+  const info = cellInfo(state, 0, 0, stats, 9999);
+  assert.equal(info.alias, 'A');
+  assert.equal(info.revealed, true);
+  assert.equal(info.solved, true);
+});
+
+test('the official scope ignores unofficial solvers', () => {
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 1,
+    official: [true, false, false, false, false, false, false, false, false, false],
+    events: [
+      [100, 1, 0, RESULT.AC],
+      [200, 2, 0, RESULT.AC],
+      [300, 3, 0, RESULT.AC],
+    ],
+  });
+
+  const asAll = replay(timeline, 9999, { revealScope: 'all' });
+  assert.equal(asAll.stats.solved[0], 3);
+  assert.ok(asAll.stats.revealed[0], '3 >= min(floor(10*.2),50) = 2');
+
+  // Only one team is official, so the population is 1 and the threshold is 0
+  // while the *count* excludes the unofficial solvers.
+  const asOfficial = replay(timeline, 9999, { revealScope: 'official' });
+  assert.equal(asOfficial.stats.teamsRanked, 1);
+  assert.equal(asOfficial.stats.solved[0], 0, 'unofficial solves are not counted');
+});
+
+// ------------------------------------- header order (rule 5, live counts)
+
+test('the header orders problems by live solve count, ties by number', () => {
+  const timeline = makeTimeline({
+    teams: 30,
+    problems: 3,
+    events: [
+      // P0 gets 2 solvers, P1 gets 5, P2 gets 1
+      [10, 0, 0, RESULT.AC], [11, 1, 0, RESULT.AC],
+      [12, 0, 1, RESULT.AC], [13, 1, 1, RESULT.AC], [14, 2, 1, RESULT.AC],
+      [15, 3, 1, RESULT.AC], [16, 4, 1, RESULT.AC],
+      [17, 0, 2, RESULT.AC],
+    ],
+  });
+  const { stats } = replay(timeline, 9999);
+  assert.deepEqual(stats.solved, [2, 5, 1]);
+  assert.deepEqual(stats.order, [1, 0, 2], 'P1 (5) > P0 (2) > P2 (1)');
+});
+
+test('the header order is stable for equal counts', () => {
+  const timeline = makeTimeline({
+    teams: 30,
+    problems: 3,
+    events: [
+      [10, 0, 2, RESULT.AC],
+      [11, 0, 0, RESULT.AC],
+      [12, 0, 1, RESULT.AC],
+    ],
+  });
+  const { stats } = replay(timeline, 9999);
+  assert.deepEqual(stats.solved, [1, 1, 1]);
+  assert.deepEqual(stats.order, [0, 1, 2], 'ties fall back to problem number');
+});
+
+test('the header re-sorts as counts change over time', () => {
+  const timeline = makeTimeline({
+    teams: 30,
+    problems: 2,
+    events: [
+      [100, 0, 0, RESULT.AC], // P0 leads early
+      [200, 0, 1, RESULT.AC],
+      [300, 1, 1, RESULT.AC],
+      [400, 2, 1, RESULT.AC], // P1 now leads
+    ],
+  });
+  assert.deepEqual(problemStatus(replayTo(timeline, 150).state, 150).order, [0, 1]);
+  assert.deepEqual(problemStatus(replayTo(timeline, 450).state, 450).order, [1, 0]);
 });
 
 // ------------------------------------------------ column ordering (rule 3)
 
 test('columnOrder applies the four buckets in order', () => {
-  // 5 problems.
-  //  - P0 revealed; team solved it at 1000
-  //  - P1 revealed; untouched
-  //  - P2 hidden; solved at 300
-  //  - P3 hidden; attempted, last submission 800
-  //  - P4 hidden; never touched
+  // 10 teams => threshold 2, so P0+P1 need two solvers each to be revealed.
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 5,
-    revealSec: [0, 0, Infinity, Infinity, Infinity],
     events: [
-      [300, 0, 2, RESULT.AC],
-      [800, 0, 3, RESULT.WA],
-      [1000, 0, 0, RESULT.AC],
+      // reveal P0 and P1
+      [10, 5, 0, RESULT.AC], [11, 6, 0, RESULT.AC],
+      [12, 5, 1, RESULT.AC], [13, 6, 1, RESULT.AC],
+      // team 0's own history
+      [300, 0, 2, RESULT.AC],  // hidden solve
+      [800, 0, 3, RESULT.WA],  // hidden attempt
+      [1000, 0, 0, RESULT.AC], // revealed solve
     ],
   });
-  const { state } = replayTo(timeline, 2000);
-  const reveal = resolveReveal(timeline, 'all');
-  const order = columnOrder(state, 0, 2000, reveal);
-  // bucket 1: revealed problems by index -> 0, 1
-  // bucket 2: solved hidden by AC time -> 2
-  // bucket 3: attempted hidden by last submit -> 3
-  // bucket 4: untouched hidden by index -> 4
+  const { state, stats } = replay(timeline, 2000);
+  const order = columnOrder(state, 0, 2000, stats.aliasRevealed);
+  // bucket 1 (revealed 0,1) -> 0,1 ; bucket 2 (hidden solve) -> 2 ;
+  // bucket 3 (hidden attempt) -> 3 ; bucket 4 (untouched) -> 4
   assert.deepEqual(order, [0, 1, 2, 3, 4]);
 });
 
 test('columnOrder puts revealed problems first even if solved later', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 3,
-    revealSec: [0, Infinity, Infinity],
     events: [
+      [10, 5, 0, RESULT.AC], [11, 6, 0, RESULT.AC], // reveal P0
       [100, 0, 1, RESULT.AC], // hidden solve, early
       [200, 0, 2, RESULT.AC], // hidden solve, later
       [9000, 0, 0, RESULT.AC], // revealed, solved last
     ],
   });
-  const { state } = replayTo(timeline, 9999);
-  const reveal = resolveReveal(timeline, 'all');
-  const order = columnOrder(state, 0, 9999, reveal);
+  const { state, stats } = replay(timeline, 9999);
+  const order = columnOrder(state, 0, 9999, stats.aliasRevealed);
   assert.deepEqual(order, [0, 1, 2], 'revealed bucket (P0) wins despite the later solve');
 });
 
 test('columnOrder sorts hidden solves by AC time ascending', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 3,
-    revealSec: [Infinity, Infinity, Infinity],
     events: [
       [500, 0, 2, RESULT.AC],
       [100, 0, 0, RESULT.AC],
       [300, 0, 1, RESULT.AC],
     ],
   });
-  const { state } = replayTo(timeline, 9999);
-  const order = columnOrder(state, 0, 9999, resolveReveal(timeline, 'all'));
-  assert.deepEqual(order, [0, 1, 2], 'P0 (100s), P1 (300s), P2 (500s)');
+  const { state, stats } = replay(timeline, 9999);
+  assert.deepEqual(columnOrder(state, 0, 9999, stats.aliasRevealed), [0, 1, 2], 'P0 100, P1 300, P2 500');
 });
 
 test('columnOrder sorts un-solved attempts by latest submission ascending', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 3,
-    revealSec: [Infinity, Infinity, Infinity],
     events: [
       [900, 0, 0, RESULT.WA],
       [100, 0, 1, RESULT.WA],
       [500, 0, 2, RESULT.WA],
     ],
   });
-  const { state } = replayTo(timeline, 9999);
-  const order = columnOrder(state, 0, 9999, resolveReveal(timeline, 'all'));
-  assert.deepEqual(order, [1, 2, 0], 'P1 (100s), P2 (500s), P0 (900s)');
+  const { state, stats } = replay(timeline, 9999);
+  assert.deepEqual(columnOrder(state, 0, 9999, stats.aliasRevealed), [1, 2, 0], 'P1 100, P2 500, P0 900');
 });
 
 test('columnOrder puts never-submitted problems last, by problem number', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 4,
-    revealSec: [Infinity, Infinity, Infinity, Infinity],
     events: [[100, 0, 3, RESULT.WA]],
   });
-  const { state } = replayTo(timeline, 9999);
-  const order = columnOrder(state, 0, 9999, resolveReveal(timeline, 'all'));
-  assert.deepEqual(order, [3, 0, 1, 2], 'attempted P3 first, then untouched P0..P2');
+  const { state, stats } = replay(timeline, 9999);
+  assert.deepEqual(columnOrder(state, 0, 9999, stats.aliasRevealed), [3, 0, 1, 2]);
 });
 
 test('columnOrder uses the legacy fallback attempt counts', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 2,
-    revealSec: [Infinity, Infinity],
     events: [],
     triesFallback: [[0, 5]],
   });
-  const { state } = replayTo(timeline, 100);
-  const order = columnOrder(state, 0, 100, resolveReveal(timeline, 'all'), {
+  const { state, stats } = replay(timeline, 100);
+  const order = columnOrder(state, 0, 100, stats.aliasRevealed, {
     triesFallback: timeline.triesFallback,
   });
   assert.deepEqual(order, [1, 0], 'P1 has attempts, so it precedes untouched P0');
 });
 
-test('column order changes over time as problems are revealed', () => {
+test('column order changes over time as a problem is revealed', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 2,
-    revealSec: [1000, Infinity],
     events: [
-      [500, 0, 1, RESULT.AC],
-      [2000, 0, 0, RESULT.AC],
+      [100, 0, 1, RESULT.AC], // hidden solve
+      [200, 5, 0, RESULT.AC], [300, 6, 0, RESULT.AC], // reveal P0 at 300
+      [400, 0, 0, RESULT.AC],
     ],
   });
-  const reveal = resolveReveal(timeline, 'all');
+  const before = replay(timeline, 250);
+  assert.deepEqual(columnOrder(before.state, 0, 250, before.stats.aliasRevealed), [1, 0], 'P0 still hidden');
 
-  const early = replayTo(timeline, 900).state;
-  assert.deepEqual(columnOrder(early, 0, 900, reveal), [1, 0], 'P0 still hidden');
-
-  const late = replayTo(timeline, 2500).state;
-  assert.deepEqual(columnOrder(late, 0, 2500, reveal), [0, 1], 'P0 revealed, takes slot 1');
+  const after = replay(timeline, 9999);
+  assert.deepEqual(columnOrder(after.state, 0, 9999, after.stats.aliasRevealed), [0, 1], 'P0 revealed, takes slot 1');
 });
 
 // ----------------------------------------------------------- epoch replay
@@ -441,32 +528,45 @@ test('createEpochReplay matches a full replay at every probe', () => {
   const epoch = createEpochReplay(timeline, { snapshotIntervalSec: 300 });
 
   for (const tSec of [0, 1, 55, 300, 3000, 5999, 6000, 6001]) {
-    const fromEpoch = epoch.frameAt(tSec).rows;
-    const fromScratch = frameAt(timeline, tSec).rows;
+    const fast = epoch.frameAt(tSec);
+    const exact = frameAt(timeline, tSec);
     assert.deepEqual(
-      fromEpoch.map((row) => [row.teamIdx, row.solved, row.penalty, row.rank]),
-      fromScratch.map((row) => [row.teamIdx, row.solved, row.penalty, row.rank]),
+      fast.rows.map((row) => [row.teamIdx, row.solved, row.penalty, row.rank]),
+      exact.rows.map((row) => [row.teamIdx, row.solved, row.penalty, row.rank]),
       `frame at ${tSec}s matches a from-scratch replay`,
     );
+    assert.deepEqual(fast.stats.solved, exact.stats.solved, `counts at ${tSec}s match`);
+    assert.deepEqual(fast.stats.order, exact.stats.order, `order at ${tSec}s matches`);
   }
 });
 
-test('createEpochReplay handles seeking backwards then forwards', () => {
+test('createEpochReplay keeps solve counts correct when seeking backwards', () => {
   const timeline = makeTimeline({
-    teams: 2,
-    problems: 2,
+    teams: 10,
+    problems: 1,
     events: [
       [100, 0, 0, RESULT.AC],
       [200, 1, 0, RESULT.AC],
-      [300, 0, 1, RESULT.AC],
-      [400, 1, 1, RESULT.AC],
+      [300, 2, 0, RESULT.AC],
+      [400, 3, 0, RESULT.AC],
     ],
   });
   const epoch = createEpochReplay(timeline, { snapshotIntervalSec: 100 });
-  assert.equal(epoch.frameAt(150).rows.find((r) => r.teamIdx === 0).solved, 1);
-  assert.equal(epoch.frameAt(350).rows.find((r) => r.teamIdx === 0).solved, 2);
-  assert.equal(epoch.frameAt(250).rows.find((r) => r.teamIdx === 0).solved, 1, 'rewind works');
-  assert.equal(epoch.frameAt(450).rows.find((r) => r.teamIdx === 0).solved, 2, 're-advance works');
+  assert.equal(epoch.frameAt(450).stats.solved[0], 4);
+  assert.equal(epoch.frameAt(250).stats.solved[0], 2, 'rewind drops later solvers');
+  assert.equal(epoch.frameAt(50).stats.solved[0], 0);
+  assert.equal(epoch.frameAt(350).stats.solved[0], 3, 're-advance restores them');
+});
+
+test('reveal flips on within one epoch replay as counts cross the threshold', () => {
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 1,
+    events: [[100, 0, 0, RESULT.AC], [500, 1, 0, RESULT.AC]],
+  });
+  const epoch = createEpochReplay(timeline);
+  assert.equal(epoch.frameAt(200).stats.revealed[0], false);
+  assert.equal(epoch.frameAt(600).stats.revealed[0], true);
 });
 
 // ------------------------------------------------------------- freeze
@@ -484,7 +584,7 @@ test('resolveFreeze clips the board once the freeze starts', () => {
   });
 });
 
-test('resolveFreeze with reveal unlocks the true final board', () => {
+test('resolveFreeze with reveal unlocks the true board', () => {
   const result = resolveFreeze({
     contestSec: 18000, durationSec: 18000, frozenDurationSec: 3600, freezeMode: 'auto', revealed: true,
   });
@@ -498,7 +598,7 @@ test('resolveFreeze never freezes when the mode is never', () => {
   });
   assert.equal(result.visibleSec, 15000);
   assert.equal(result.frozen, false);
-  assert.equal(result.revealPending, false);
+  assert.equal(result.frozenAtSec, null);
 });
 
 test('resolveFreeze is a no-op for contests without a freeze window', () => {
@@ -520,7 +620,7 @@ test('resolveFreeze clamps beyond the contest duration', () => {
 
 test('session goes through countdown, running, frozen and revealed', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 1,
     durationSec: 18000,
     frozenDurationSec: 3600,
@@ -531,16 +631,21 @@ test('session goes through countdown, running, frozen and revealed', () => {
 
   assert.equal(session.update(t0).phase, PHASE.PENDING);
   assert.equal(session.update(t0 + 20_000).phase, PHASE.RUNNING);
-  assert.equal(session.update(t0 + 10_000 + 14_500_000).phase, PHASE.FROZEN);
+
+  const frozen = session.update(t0 + 10_000 + 15_000_000);
+  assert.equal(frozen.phase, PHASE.FROZEN);
+  assert.equal(frozen.visibleSec, 14400, 'board is pinned to the freeze second');
+  assert.ok(frozen.contestSec > 14400, 'the real clock keeps running while frozen');
+
   const end = session.update(t0 + 10_000 + 18_000_000);
   assert.equal(end.phase, PHASE.ENDED);
-  assert.equal(end.revealed, true, 'the frozen board is revealed at the end');
+  assert.equal(end.revealed, true, 'the freeze lifts automatically at the end');
   assert.equal(end.visibleSec, 18000);
 });
 
-test('a frozen session stops reflecting new events', () => {
+test('a frozen session stops reflecting new events, and unfreezing reveals them', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 2,
     durationSec: 18000,
     frozenDurationSec: 3600,
@@ -558,11 +663,81 @@ test('a frozen session stops reflecting new events', () => {
   assert.equal(frozen.rows[0].solved, 1, 'the 15000s solve is invisible while frozen');
 
   const revealed = session.reveal(t0 + 16_000_000);
-  assert.equal(revealed.rows[0].solved, 2, 'revealing exposes the real result');
+  assert.equal(revealed.revealed, true);
+  assert.equal(revealed.rows[0].solved, 2, 'unfreezing exposes the real result');
+
+  const refrozen = session.unreveal(t0 + 16_000_000);
+  assert.equal(refrozen.frozen, true);
+  assert.equal(refrozen.rows[0].solved, 1, 'and it can be frozen again');
+});
+
+test('freeze mode never keeps the board live to the end', () => {
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 2,
+    durationSec: 18000,
+    frozenDurationSec: 3600,
+    events: [[600, 0, 0, RESULT.AC], [15000, 0, 1, RESULT.AC]],
+  });
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0, freezeMode: 'never' });
+  const frame = session.update(t0 + 16_000_000);
+  assert.equal(frame.frozen, false);
+  assert.equal(frame.visibleSec, 16000);
+  assert.equal(frame.rows[0].solved, 2);
+});
+
+test('a whole contest freezes, holds, then fully unfreezes at the end', () => {
+  // 20 teams => threshold min(floor(20*0.2), 50) = 4.
+  const timeline = makeTimeline({
+    teams: 20,
+    problems: 3,
+    durationSec: 18000,
+    frozenDurationSec: 3600, // freezes at 14400
+    events: [
+      // Problem A: 4 solvers before the freeze point -> revealed while frozen
+      [100, 0, 0, RESULT.AC],
+      [200, 1, 0, RESULT.AC],
+      [300, 2, 0, RESULT.AC],
+      [14390, 3, 0, RESULT.AC],
+      // Problem B: only reaches the threshold AFTER the freeze
+      [15000, 4, 1, RESULT.AC],
+      [15100, 5, 1, RESULT.AC],
+      [15200, 6, 1, RESULT.AC],
+      [15300, 7, 1, RESULT.AC],
+      // Problem C: never reaches it
+      [16000, 8, 2, RESULT.AC],
+    ],
+  });
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0 });
+
+  // Just before the freeze: live, A revealed, B/C hidden.
+  const before = session.update(t0 + 14399 * 1000);
+  assert.equal(before.phase, PHASE.RUNNING);
+  assert.equal(before.frozen, false);
+  assert.deepEqual(before.stats.revealed, [true, false, false]);
+
+  // Inside the freeze window: pinned, and the later solves are invisible.
+  const frozen = session.update(t0 + 16000 * 1000);
+  assert.equal(frozen.phase, PHASE.FROZEN);
+  assert.equal(frozen.visibleSec, 14400);
+  assert.equal(frozen.revealed, false, 'not unfrozen yet');
+  assert.deepEqual(frozen.stats.solved, [4, 0, 0], 'post-freeze solves are hidden');
+  assert.deepEqual(frozen.stats.revealed, [true, false, false]);
+
+  // Past the end: the freeze lifts by itself and everything is visible.
+  const ended = session.update(t0 + 18001 * 1000);
+  assert.equal(ended.phase, PHASE.ENDED);
+  assert.equal(ended.frozen, false);
+  assert.equal(ended.revealed, true);
+  assert.equal(ended.visibleSec, 18000);
+  assert.deepEqual(ended.stats.solved, [4, 4, 1], 'the true final counts');
+  assert.deepEqual(ended.stats.revealed, [true, true, false], 'B reveals, C never does');
 });
 
 test('session pause and resume preserve the contest second', () => {
-  const timeline = makeTimeline({ teams: 1, problems: 1, events: [] });
+  const timeline = makeTimeline({ teams: 2, problems: 1, events: [] });
   const t0 = 1_000_000_000_000;
   const session = createSession(timeline, { startAt: t0, now: t0 });
 
@@ -574,50 +749,49 @@ test('session pause and resume preserve the contest second', () => {
 });
 
 test('session speed changes keep the current contest second', () => {
-  const timeline = makeTimeline({ teams: 1, problems: 1, events: [] });
+  const timeline = makeTimeline({ teams: 2, problems: 1, events: [] });
   const t0 = 1_000_000_000_000;
   const session = createSession(timeline, { startAt: t0, now: t0 });
 
   session.update(t0 + 600_000);
   session.setSpeed(60);
-  assert.equal(session.update(t0 + 600_000).contestSec, 600, 'instant change preserves the position');
-  assert.equal(session.update(t0 + 610_000).contestSec, 1200, '10s of wall time is 600 contest seconds');
+  assert.equal(session.update(t0 + 600_000).contestSec, 600);
+  assert.equal(session.update(t0 + 610_000).contestSec, 1200, '10s wall = 600 contest seconds');
 });
 
 test('session seek detaches and followLive rejoins', () => {
-  const timeline = makeTimeline({ teams: 1, problems: 1, events: [] });
+  const timeline = makeTimeline({ teams: 2, problems: 1, events: [] });
   const t0 = 1_000_000_000_000;
   const session = createSession(timeline, { startAt: t0, now: t0 });
 
   session.seek(5000, t0 + 100_000);
   assert.equal(session.update(t0 + 200_000).contestSec, 5000, 'detached clock is stable');
-  assert.equal(session.detached, true);
   session.followLive(t0 + 200_000);
-  assert.equal(session.detached, false);
   assert.equal(session.update(t0 + 205_000).contestSec, 5005, 'rejoined at the same second');
 });
 
 test('session clamps seek to the contest duration', () => {
   const timeline = makeTimeline({ teams: 1, problems: 1, events: [], durationSec: 1000 });
-  const session = createSession(timeline, { startAt: 0, now: 0 });
-  assert.equal(session.seek(99999, 0).visibleSec, 1000);
-  assert.equal(session.seek(-5, 0).visibleSec, 0);
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0 });
+  assert.equal(session.seek(99999, t0).visibleSec, 1000);
+  assert.equal(session.seek(-5, t0).visibleSec, 0);
 });
 
-test('session switching reveal scope recalculates the threshold', () => {
+test('session switching reveal scope changes the counted population', () => {
   const timeline = makeTimeline({
-    teams: 2,
+    teams: 10,
     problems: 1,
-    events: [[100, 0, 0, RESULT.AC]],
-    revealSec: [100],
+    official: [true, false, false, false, false, false, false, false, false, false],
+    events: [[100, 1, 0, RESULT.AC], [200, 2, 0, RESULT.AC]],
   });
-  timeline.reveal.official = { teamsRanked: 1, threshold: 1, revealSec: [100] };
-  timeline.reveal.all = { teamsRanked: 2, threshold: 2, revealSec: [Infinity] };
-
-  const session = createSession(timeline, { startAt: 0, now: 0, revealScope: 'all' });
-  assert.equal(session.update(1000).reveal.revealSec[0], Infinity);
-  session.setRevealScope('official', 1000);
-  assert.equal(session.update(1000).reveal.revealSec[0], 100);
+  const t0 = 1_000_000_000_000;
+  const at = t0 + 1000 * 1000; // 1000 contest seconds in
+  const session = createSession(timeline, { startAt: t0, now: t0, revealScope: 'all' });
+  assert.equal(session.update(at).contestSec, 1000, 'the clock is in seconds, not ms');
+  assert.equal(session.update(at).stats.solved[0], 2, 'both solvers counted');
+  session.setRevealScope('official', at);
+  assert.equal(session.update(at).stats.solved[0], 0, 'unofficial solvers excluded');
 });
 
 // ------------------------------------------------------------- formatting
@@ -629,4 +803,10 @@ test('formatClock prints H:MM:SS', () => {
   assert.equal(formatClock(18000), '5:00:00');
   assert.equal(formatClock(3661), '1:01:01');
   assert.equal(formatClock(-5), '0:00:00');
+});
+
+test('BUCKET ordering matches the documented priority', () => {
+  assert.ok(BUCKET.REVEALED < BUCKET.SOLVED_HIDDEN);
+  assert.ok(BUCKET.SOLVED_HIDDEN < BUCKET.ATTEMPTED_HIDDEN);
+  assert.ok(BUCKET.ATTEMPTED_HIDDEN < BUCKET.UNTOUCHED);
 });

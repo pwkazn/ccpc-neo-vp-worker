@@ -76,7 +76,8 @@ const app = {
   session: null,
   board: null,
   rafId: 0,
-  lastBoardRender: 0,
+  /** contest second the board was last painted at (1 Hz cadence) */
+  lastBoardSec: -1,
   /** start time carried over from the URL until the timeline is loaded */
   pendingStartAt: null,
   /** playback speed carried over from the URL */
@@ -435,10 +436,15 @@ function enterBoard() {
   el.footerSource.textContent = app.timeline.source.srkUrl
     ? `榜单文件: ${app.timeline.source.srkUrl.split('/').slice(-2).join('/')}`
     : '';
-  el.settingsInfo.textContent = `过题门限：${app.timeline.reveal.all.threshold} 队`
-    + `（全部 ${app.timeline.reveal.all.teamsRanked} 队）`
-    + ` / ${app.timeline.reveal.official.threshold} 队（官方 ${app.timeline.reveal.official.teamsRanked} 队）`;
+  // The threshold is min(floor(N x 20%), 50).
+  const all = app.timeline.reveal.all;
+  const official = app.timeline.reveal.official;
+  el.settingsInfo.textContent = `题号门限 = min(⌊队数×20%⌋, 50)：`
+    + `全部队伍 ${all.threshold}（${all.teamsRanked} 队）`
+    + ` / 仅官方 ${official.threshold}（${official.teamsRanked} 队）。`
+    + `某题过题队数达到该值即显示题号。`;
   showView('board');
+  app.lastBoardSec = -1;
 }
 
 // ------------------------------------------------------------------- loop
@@ -481,19 +487,38 @@ function renderCountdown(frame) {
   const remaining = Math.max(0, -frame.contestSec);
   const minutes = Math.floor(remaining / 60);
   const seconds = Math.floor(remaining % 60);
-  el.countdownValue.textContent = minutes > 0
+  const text = minutes > 0
     ? `${minutes}:${String(seconds).padStart(2, '0')}`
     : `${Math.ceil(remaining)}`;
+  if (el.countdownValue.textContent !== text) {
+    el.countdownValue.textContent = text;
+    el.countdownValue.classList.remove('is-tick');
+    void el.countdownValue.offsetWidth;
+    el.countdownValue.classList.add('is-tick');
+  }
   el.countdownMeta.textContent = buildCountdownMeta();
 }
 
+/**
+ * Paint the chrome (clock, badges, controls) and, at most once per contest
+ * second, the board itself.
+ *
+ * The board is deliberately *not* repainted on every animation frame. Rebuilding
+ * rows 60 times a second made the whole page look like it was vibrating; the
+ * data only changes when a submission lands, and the live clock is the only
+ * thing that needs sub-second updates.
+ */
 function renderBoard(frame) {
-  el.clockContest.textContent = formatClock(Math.max(0, Math.floor(frame.contestSec)));
+  // While frozen the board is pinned to the freeze second even though the real
+  // contest clock keeps running, so show the frozen time as "current".
+  const displaySec = frame.frozen ? frame.visibleSec : frame.contestSec;
+  el.clockContest.textContent = formatClock(Math.max(0, Math.floor(displaySec)));
   el.clockWall.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   el.seek.value = String(frame.visibleSec);
   el.seek.title = `比赛时间 ${formatClock(frame.visibleSec)}`;
 
   el.badgeFreeze.hidden = !frame.frozen;
+  el.badgeFreeze.classList.toggle('badge--pulse', frame.frozen);
   el.badgePhase.textContent = {
     [PHASE.PENDING]: '等待开始',
     [PHASE.RUNNING]: '进行中',
@@ -509,17 +534,22 @@ function renderBoard(frame) {
     button.classList.toggle('is-active', Number(button.dataset.speed) === frame.speed);
   }
 
+  const stats = frame.stats ?? frame.reveal;
+  const revealedCount = stats.aliasRevealed.filter((value) => value !== Infinity).length;
+
   const status = [];
   if (frame.detached) status.push('已脱离实时（拖动或暂停中）');
-  if (frame.revealed) status.push('已揭榜：显示最终榜单');
-  else if (frame.frozen) status.push(`已封榜于 ${formatClock(frame.frozenAtSec)}`);
-  status.push(`显示 ${frame.rows.length} 队`);
+  if (frame.revealed) status.push('已解封：显示完整榜单');
+  else if (frame.frozen) status.push(`已封榜，冻结于 ${formatClock(frame.frozenAtSec)}`);
+  status.push(`门限 ${stats.threshold} 队`);
   el.playerStatus.textContent = status.join(' · ');
-  el.boardSummary.textContent = `共 ${frame.rows.length} 队 · 当前显示至 ${formatClock(frame.visibleSec)}`;
 
-  const now = performance.now();
-  if (app.board && now - app.lastBoardRender >= 200) {
-    app.lastBoardRender = now;
+  el.boardSummary.textContent = `共 ${frame.rows.length} 队 · 题目 ${revealedCount}/${stats.solved.length} 已显示`
+    + ` · 榜单截至 ${formatClock(frame.visibleSec)}`;
+
+  // Repaint the board only when the displayed contest second actually changed.
+  if (app.board && frame.visibleSec !== app.lastBoardSec) {
+    app.lastBoardSec = frame.visibleSec;
     app.board.render(frame);
   }
 }
@@ -559,6 +589,7 @@ el.btnChange.addEventListener('click', () => {
   showView('picker');
   el.badgeFreeze.hidden = true;
   el.badgePhase.textContent = '准备中';
+  app.lastBoardSec = -1;
 });
 
 el.btnPause.addEventListener('click', () => {

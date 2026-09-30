@@ -203,9 +203,10 @@ test('real ranklist: reveal times follow the live accepted count', { timeout: TI
 
   assert.equal(
     threshold,
-    Math.max(Math.floor(timeline.reveal.all.teamsRanked * 0.2), 50),
-    'threshold matches floor(N * 20%) with the 50-team floor',
+    Math.max(1, Math.min(Math.floor(timeline.reveal.all.teamsRanked * 0.2), 50)),
+    'threshold is min(floor(N * 20%), 50)',
   );
+  assert.ok(threshold <= 50, 'the 50-team figure is an upper bound');
 
   for (let i = 0; i < timeline.problems.length; i++) {
     if (timeline.reveal.all.revealSec[i] === null) {

@@ -2,10 +2,11 @@
  * CCPC "new ranklist" rules, implemented as pure functions.
  *
  * This module is the single authority for:
- *   1. problem-alias reveal thresholds,
- *   2. per-team problem column ordering,
- *   3. ICPC scoring (accepted count + penalty) under the new rules,
- *   4. final ranking.
+ *   1. the problem-alias reveal threshold and its exact reveal moment,
+ *   2. the row-header order (descending by how many teams solved each problem),
+ *   3. per-team column ordering,
+ *   4. ICPC scoring (accepted count + penalty) under the new rules,
+ *   5. final ranking.
  *
  * Everything here is isomorphic: it runs in Node for tests and in the browser
  * for the live board. It never touches the DOM or the network.
@@ -20,6 +21,23 @@ import { isAccepted } from './srk.mjs';
 export const REVEAL_RATIO = 0.2;
 export const REVEAL_MIN = 50;
 
+/**
+ * The alias of a problem is revealed once the number of distinct teams that
+ * solved it reaches `threshold`.
+ *
+ * NOTE ON THE FORMULA: the rule is the *smaller* of "floor(20% of the ranked
+ * teams)" and 50 — i.e. the 50-team figure is an upper bound that keeps small
+ * contests from never revealing anything, while a hypothetically huge field
+ * still reveals at 50 solves. An earlier revision of this tool used `max`,
+ * which was wrong.
+ */
+export function revealThreshold(teamsRanked, ratio = REVEAL_RATIO, min = REVEAL_MIN) {
+  // The outer max(1, ...) is a practical floor: with fewer than 10 ranked teams
+  // floor(20%) is 0, and a threshold of 0 would mean "revealed before anyone
+  // solved it". A problem always needs at least one solver.
+  return Math.max(1, Math.min(Math.floor(teamsRanked * ratio), min));
+}
+
 /** Sort buckets for a team's problem columns (see docs/rules.md rule 3). */
 export const BUCKET = Object.freeze({
   REVEALED: 0,
@@ -29,14 +47,62 @@ export const BUCKET = Object.freeze({
 });
 
 /**
+ * Counts, per problem, how many distinct counted teams have solved it.
+ *
+ * The reveal rule needs this counter *as of the currently displayed second*,
+ * not the published final tally, so it is maintained incrementally during
+ * replay (see `applyEvent`) and restored from snapshots when seeking.
+ */
+export class CountedSolves {
+  /**
+   * @param {number} problemCount
+   * @param {boolean[]} [counted] which teams participate in the count
+   */
+  constructor(problemCount, counted = null) {
+    this.counted = counted ?? null;
+    this.perProblem = new Int32Array(problemCount);
+  }
+
+  /** Whether a team contributes to the reveal count. */
+  includes(teamIdx) {
+    return this.counted === null || this.counted[teamIdx] === true;
+  }
+
+  /** Record a first solve. Returns true when it actually changed the counter. */
+  add(teamIdx, probIdx) {
+    if (!this.includes(teamIdx)) return false;
+    this.perProblem[probIdx] += 1;
+    return true;
+  }
+
+  /** Number of counted solving teams for one problem. */
+  count(probIdx) {
+    return this.perProblem[probIdx];
+  }
+
+  clone() {
+    const copy = new CountedSolves(this.perProblem.length, this.counted);
+    copy.perProblem.set(this.perProblem);
+    return copy;
+  }
+}
+
+/**
  * Create the initial replay state for a timeline.
  *
  * @param {object} timeline wire timeline
+ * @param {object} [options]
+ * @param {'all'|'official'} [options.revealScope] teams counted for reveal
  */
-export function createState(timeline) {
+export function createState(timeline, options = {}) {
   const teamCount = timeline.teams.length;
   const problemCount = timeline.problems.length;
   const sorter = timeline.sorter ?? {};
+
+  const scope = options.revealScope ?? 'all';
+  const counted = scope === 'official'
+    ? timeline.teams.map((team) => team.official !== false)
+    : null;
 
   return {
     timeline,
@@ -45,6 +111,7 @@ export function createState(timeline) {
     penaltySec: sorter.penaltySec ?? 20 * 60,
     noPenaltyCodes: new Set(sorter.noPenaltyCodes ?? []),
     timePrecision: sorter.timePrecision ?? null,
+    revealScope: scope,
 
     solved: new Int32Array(teamCount),
     penalty: new Float64Array(teamCount),
@@ -54,10 +121,13 @@ export function createState(timeline) {
     acAt: new Int32Array(teamCount * problemCount).fill(-1),
     /** @type {Int32Array} number of penalty-bearing submissions before the AC */
     fails: new Int32Array(teamCount * problemCount),
-    /** @type {Int32Array} submissions seen so far (pre-AC only, per the rules) */
+    /** @type {Int32Array} submissions seen so far (pre-AC only) */
     subs: new Int32Array(teamCount * problemCount),
     /** @type {Int32Array} contest second of the latest pre-AC submission, -1 if none */
     lastSub: new Int32Array(teamCount * problemCount).fill(-1),
+
+    /** live "distinct solving teams per problem" counter for the reveal rule */
+    counted: new CountedSolves(problemCount, counted),
   };
 }
 
@@ -83,6 +153,8 @@ export function applyEvent(state, event) {
     state.penalty[teamIdx] += floorToPrecision(tSec, state.timePrecision)
       + state.fails[key] * state.penaltySec;
     if (tSec > state.lastAc[teamIdx]) state.lastAc[teamIdx] = tSec;
+    // First solve for this team/problem: feed the reveal counter.
+    state.counted.add(teamIdx, probIdx);
     return true;
   }
 
@@ -95,28 +167,25 @@ export function applyEvent(state, event) {
 /**
  * Replay every event with `tSec <= limitSec`, returning fresh state.
  *
- * A full replay of a large contest (~31k events) takes a few milliseconds, so
- * this is used directly for seeking and for the per-second redraw.
- *
  * @param {object} timeline
  * @param {number} limitSec
  * @param {object} [options]
  * @param {object} [options.state] reuse this state instead of allocating
  * @param {number} [options.fromIndex] index of the first event to apply
- * @param {number} [options.fromSec] only apply events after this second
+ * @param {number} [options.fromSec] contest second already reflected by `state`
+ * @param {'all'|'official'} [options.revealScope]
  */
 export function replayTo(timeline, limitSec, options = {}) {
-  const state = options.state ?? createState(timeline);
+  const state = options.state ?? createState(timeline, options);
   const events = timeline.events;
   let index = 0;
 
   if (options.fromIndex !== undefined) {
     index = Math.max(0, Math.min(options.fromIndex, events.length));
     if (options.fromSec !== undefined) {
-      // Rewind to the first event strictly after `fromSec`, so that events
-      // sharing the boundary second are re-applied rather than skipped.
-      // Re-application is safe: after a team solves a problem all of its
-      // later submissions to that problem are ignored.
+      // Rewind to the first event after `fromSec`, so events sharing the
+      // boundary second are re-applied rather than skipped. Re-application is
+      // safe: after a team solves a problem its later submissions are ignored.
       while (index > 0 && events[index - 1][0] > options.fromSec) index--;
     }
   }
@@ -130,7 +199,7 @@ export function replayTo(timeline, limitSec, options = {}) {
   return { state, nextIndex: index };
 }
 
-/** Clone a replay state (typed arrays are copied). */
+/** Clone a replay state (typed arrays and the solve counter are copied). */
 export function cloneState(state) {
   return {
     timeline: state.timeline,
@@ -139,6 +208,7 @@ export function cloneState(state) {
     penaltySec: state.penaltySec,
     noPenaltyCodes: state.noPenaltyCodes,
     timePrecision: state.timePrecision,
+    revealScope: state.revealScope,
     solved: state.solved.slice(),
     penalty: state.penalty.slice(),
     lastAc: state.lastAc.slice(),
@@ -146,6 +216,7 @@ export function cloneState(state) {
     fails: state.fails.slice(),
     subs: state.subs.slice(),
     lastSub: state.lastSub.slice(),
+    counted: state.counted.clone(),
   };
 }
 
@@ -169,50 +240,17 @@ export function floorToPrecision(seconds, precision) {
 }
 
 /**
- * Compute, per problem, the contest second at which its alias becomes visible.
+ * The four per-team column buckets (rule 3).
  *
- * Rule 1: a problem's alias is revealed once the number of distinct teams that
- * solved it reaches `max(floor(N * ratio), min)`.
- *
- * @param {object} timeline
- * @param {'all'|'official'} [scope] which teams count towards N
- * @returns {{ threshold: number, teamsRanked: number, revealSec: number[] }}
- */
-export function resolveReveal(timeline, scope = 'all') {
-  const variant = timeline.reveal?.[scope] ?? timeline.reveal?.all;
-  const revealSec = (variant?.revealSec ?? []).map((value) => (value === null ? Infinity : value));
-  return {
-    threshold: variant?.threshold ?? Math.max(Math.floor(timeline.teams.length * REVEAL_RATIO), REVEAL_MIN),
-    teamsRanked: variant?.teamsRanked ?? timeline.teams.length,
-    revealSec,
-  };
-}
-
-/** Is a problem's alias visible at contest second `tSec`? */
-export function isRevealed(reveal, probIdx, tSec) {
-  return tSec >= reveal.revealSec[probIdx];
-}
-
-/**
- * Build the ordered list of problem columns for one team, implementing rule 3.
- *
- * 1. revealed problems, ascending by problem number (the SRK problem order);
- * 2. remaining problems the team has solved, by solve time ascending;
- * 3. remaining problems the team has submitted to, by latest submission
- *    ascending (never-submitted problems sort last);
- * 4. never-submitted problems, ascending by problem number.
- *
- * Buckets 2-4 keep the alias hidden; only bucket 1 shows it.
- *
- * @param {object} state replay state
+ * @param {object} state replay state at `tSec`
  * @param {number} teamIdx
  * @param {number} tSec current contest second
- * @param {object} reveal output of resolveReveal()
+ * @param {number[]} aliasRevealed reveal second per problem (`Infinity` = never)
  * @param {object} [options]
  * @param {ArrayLike<number>} [options.triesFallback] legacy per-team attempt counts
  * @returns {number[]} problem indices, in display order
  */
-export function columnOrder(state, teamIdx, tSec, reveal, options = {}) {
+export function columnOrder(state, teamIdx, tSec, aliasRevealed, options = {}) {
   const problemCount = state.problemCount;
   const base = teamIdx * problemCount;
   const fallback = options.triesFallback;
@@ -223,7 +261,7 @@ export function columnOrder(state, teamIdx, tSec, reveal, options = {}) {
   for (let probIdx = 0; probIdx < problemCount; probIdx++) {
     const key = base + probIdx;
     const solvedAt = state.acAt[key];
-    const revealed = isRevealed(reveal, probIdx, tSec);
+    const revealed = tSec >= aliasRevealed[probIdx];
     const subs = state.subs[key];
     const legacyTries = fallback ? (fallback[teamIdx]?.[probIdx] ?? 0) : 0;
     const attempted = subs > 0 || legacyTries > 0;
@@ -241,7 +279,7 @@ export function columnOrder(state, teamIdx, tSec, reveal, options = {}) {
       key2 = probIdx;
     } else if (attempted) {
       bucket = BUCKET.ATTEMPTED_HIDDEN;
-      // Without timestamps (legacy data) the "latest submission" is unknown;
+      // Without timestamps (legacy data) the latest submission is unknown;
       // fall back to the problem number so the order stays deterministic.
       const lastSub = state.lastSub[key];
       key1 = lastSub === -1 ? Number.MAX_SAFE_INTEGER : lastSub;
@@ -260,17 +298,72 @@ export function columnOrder(state, teamIdx, tSec, reveal, options = {}) {
 }
 
 /**
+ * Per-problem facts the board needs at the displayed second.
+ *
+ * `solved` is the live count of distinct counted teams that have solved the
+ * problem by `tSec`; `revealed` is whether that count has reached the
+ * threshold, and `order` is the row-header order.
+ *
+ * @param {object} state replay state (already replayed to `tSec`)
+ * @param {number} tSec
+ * @param {object} [options]
+ * @param {number} [options.ratio]
+ * @param {number} [options.min]
+ * @returns {{
+ *   threshold: number,
+ *   teamsRanked: number,
+ *   solved: number[],
+ *   aliasRevealed: number[],
+ *   revealed: boolean[],
+ *   order: number[],
+ * }}
+ */
+export function problemStatus(state, tSec, options = {}) {
+  const problemCount = state.problemCount;
+  const ratio = Number.isFinite(options.ratio) ? options.ratio : REVEAL_RATIO;
+  const min = Number.isFinite(options.min) ? options.min : REVEAL_MIN;
+
+  // Teams counted for the threshold. With `revealScope: 'official'` the state's
+  // counter already filters, so the population is the official team count.
+  let teamsRanked = state.teamCount;
+  if (state.revealScope === 'official') {
+    teamsRanked = 0;
+    for (let i = 0; i < state.teamCount; i++) {
+      if (state.counted.includes(i)) teamsRanked++;
+    }
+  }
+
+  const threshold = revealThreshold(teamsRanked, ratio, min);
+  const solved = new Array(problemCount);
+  const revealed = new Array(problemCount);
+  const revealedAt = new Array(problemCount);
+
+  for (let probIdx = 0; probIdx < problemCount; probIdx++) {
+    const count = state.counted.count(probIdx);
+    solved[probIdx] = count;
+    revealed[probIdx] = count >= threshold;
+    revealedAt[probIdx] = revealed[probIdx] ? tSec : Infinity;
+  }
+
+  // Row-header order: descending by live solve count, then by problem number.
+  const order = Array.from({ length: problemCount }, (_, i) => i);
+  order.sort((a, b) => solved[b] - solved[a] || a - b);
+
+  return { threshold, teamsRanked, solved, aliasRevealed: revealedAt, revealed, order };
+}
+
+/**
  * Compute the full board at contest second `tSec`.
  *
  * @param {object} state replay state (must already be replayed to `tSec`)
  * @param {number} tSec
- * @param {object} reveal
+ * @param {object} stats output of `problemStatus()`
  * @param {object} [options]
  * @param {boolean} [options.officialOnly] rank official teams only
  * @param {ArrayLike<number>} [options.triesFallback]
  * @returns {{ rows: object[], officialTeams: number }}
  */
-export function computeBoard(state, tSec, reveal, options = {}) {
+export function computeBoard(state, tSec, stats, options = {}) {
   const timeline = state.timeline;
   const rows = [];
   let officialTeams = 0;
@@ -280,15 +373,12 @@ export function computeBoard(state, tSec, reveal, options = {}) {
     const official = team.official !== false;
     if (official) officialTeams++;
 
-    const solved = state.solved[teamIdx];
-    const penalty = floorToPrecision(state.penalty[teamIdx], state.timePrecision);
-
     rows.push({
       teamIdx,
       team,
       official,
-      solved,
-      penalty,
+      solved: state.solved[teamIdx],
+      penalty: floorToPrecision(state.penalty[teamIdx], state.timePrecision),
       lastAc: state.lastAc[teamIdx],
       rank: 0,
       columns: null,
@@ -314,7 +404,7 @@ export function computeBoard(state, tSec, reveal, options = {}) {
 
   for (const row of rows) {
     if (!row.official) row.rank = 0;
-    row.columns = columnOrder(state, row.teamIdx, tSec, reveal, {
+    row.columns = columnOrder(state, row.teamIdx, tSec, stats.aliasRevealed, {
       triesFallback: options.triesFallback,
     });
   }
@@ -346,15 +436,15 @@ export function compareRows(a, b) {
  * @param {object} state
  * @param {number} teamIdx
  * @param {number} probIdx
- * @param {object} reveal
+ * @param {object} stats output of `problemStatus()`
  * @param {number} tSec
  */
-export function cellInfo(state, teamIdx, probIdx, reveal, tSec) {
+export function cellInfo(state, teamIdx, probIdx, stats, tSec) {
   const key = teamIdx * state.problemCount + probIdx;
   const acAt = state.acAt[key];
   const subs = state.subs[key];
   const attempted = subs > 0;
-  const revealed = isRevealed(reveal, probIdx, tSec);
+  const revealed = tSec >= stats.aliasRevealed[probIdx];
 
   return {
     solved: acAt !== -1,

@@ -1,44 +1,61 @@
 /**
- * Virtualised ranklist board renderer.
+ * Virtualised ranklist board.
  *
- * Only the rows inside the viewport (plus an overscan margin) exist in the DOM,
- * which keeps a 2700-team board smooth.
+ * Layout notes
+ * ------------
+ * Rows are absolutely positioned inside a tall relative "inner" element and
+ * moved with `transform: translateY(...)`. That is what makes rank swaps slide
+ * instead of jumping, and it keeps each team bound to one DOM element so a
+ * reorder never rebuilds a row. The header is `position: sticky` inside the
+ * same scroller, and the identity columns stick horizontally, so both work
+ * without a native <table> (whose rows cannot be positioned this way).
  *
- * Column layout follows the CCPC new ranklist rules: the header lists every
- * problem in problem-number order (aliases hidden until revealed), while each
- * *row* reorders its own cells so that the problems that team solved most
- * recently appear first. Because the column order is per team, a cell's
- * position is not a problem identity — the cell datasets carry the identity.
+ * CCPC new-ranklist behaviour implemented here:
+ *   1. the header lists every problem ordered by live solve count (descending,
+ *      ties by problem number) and shows that count; an unrevealed problem
+ *      shows `?` with no colour;
+ *   2. each row orders its own cells (revealed by number, then hidden solves by
+ *      solve time, then other attempts by latest submission, then untouched).
+ *      A cell's position is therefore not a problem identity.
  */
 
-const OVERSCAN = 8;
-const ROW_HEIGHT = 26;
-const HEAD_HEIGHT = 52;
+const OVERSCAN = 10;
+const ROW_HEIGHT = 30;
+const HEAD_HEIGHT = 56;
 const STICKY = ['rank', 'team', 'org', 'solved', 'penalty'];
 
-/** Sticky column widths, mirrored in ui.css. */
+/** Fixed column widths in px; mirrored in ui.css. */
 export const COLUMN_WIDTHS = Object.freeze({
-  rank: 50,
-  team: 172,
-  org: 150,
-  solved: 58,
-  penalty: 58,
+  rank: 56,
+  team: 190,
+  org: 165,
+  solved: 60,
+  penalty: 66,
 });
+
+/** Horizontal offset of each sticky column, derived from the widths. */
+export const STICKY_OFFSETS = (() => {
+  const offsets = {};
+  let x = 0;
+  for (const name of STICKY) {
+    offsets[name] = x;
+    x += COLUMN_WIDTHS[name];
+  }
+  return offsets;
+})();
 
 /**
  * Content of one problem cell, derived only from replayed state.
  *
- * The alias being hidden does not affect this: a team's solve on an unrevealed
- * problem is still shown (the CCPC new format shows *that* a problem was solved,
- * just not which one).
+ * A hidden alias does not change this: the new format shows *that* a problem
+ * was solved, just not which one.
  *
  * @param {object} state replay state
  * @param {number} teamIdx
  * @param {number} probIdx
- * @param {ArrayLike<number>|null} [triesFallback] per-team attempt counts used by
- *   legacy ranklists that carry no per-solution timestamps. Pass `null` when the
- *   timeline is exact, so the live count is authoritative. A per-problem entry of
- *   `-1` also means "unknown, use the live count".
+ * @param {ArrayLike<number>|null} [triesFallback] legacy per-team attempt counts
+ *   (`null` when the timeline is exact; a per-problem value of `-1` also means
+ *   "use the live count")
  * @returns {{ text: string, className: string, solved: boolean, attempted: boolean }}
  */
 export function cellContent(state, teamIdx, probIdx, triesFallback = null) {
@@ -71,86 +88,92 @@ export function cellContent(state, teamIdx, probIdx, triesFallback = null) {
   return { text: '', className: 'cell', solved: false, attempted: false };
 }
 
+/** Tooltip for a header cell. */
+export function headerTitle(problem, revealed, solved) {
+  if (!revealed) {
+    return `题号尚未显示：过题队伍数未达门限（当前 ${solved} 队）`
+      + (problem.title ? `\n(题目：${problem.title})` : '');
+  }
+  return `${problem.alias}${problem.title ? ` — ${problem.title}` : ''}\n当前过题：${solved} 队`;
+}
+
 /**
  * @param {object} options
- * @param {HTMLElement} options.container scroll container (`#board`)
+ * @param {HTMLElement} options.container scroll container
  * @param {object} options.timeline wire timeline
  */
 export function createBoard({ container, timeline }) {
   container.replaceChildren();
 
   const problemCount = timeline.problems.length;
-  const totalColumns = STICKY.length + problemCount;
+  const stickyWidth = STICKY.reduce((sum, name) => sum + COLUMN_WIDTHS[name], 0);
+  const totalWidth = stickyWidth + problemCount * COLUMN_WIDTHS.solved;
 
-  const table = document.createElement('table');
-  table.className = 'board__table';
+  const inner = document.createElement('div');
+  inner.className = 'board__inner';
+  inner.style.width = `${Math.max(totalWidth, 100)}px`;
 
-  const thead = document.createElement('thead');
-  const headRow = document.createElement('tr');
+  // ---- header -------------------------------------------------------------
+  const head = document.createElement('div');
+  head.className = 'board__head';
+  head.style.height = `${HEAD_HEIGHT}px`;
+  head.style.width = `${Math.max(totalWidth, 100)}px`;
 
-  const headers = {};
+  const stickyLabels = { rank: '名次', team: '队伍', org: '学校', solved: '题数', penalty: '罚时' };
+  /** @type {Record<string, HTMLElement>} */
+  const stickyCells = {};
   for (const name of STICKY) {
-    const cell = document.createElement('th');
-    cell.className = `col-${name}`;
-    cell.textContent = { rank: '名次', team: '队伍', org: '学校', solved: '题数', penalty: '罚时' }[name];
-    headers[name] = cell;
-    headRow.append(cell);
+    const cell = document.createElement('div');
+    cell.className = `head-cell col-${name}`;
+    cell.textContent = stickyLabels[name];
+    cell.style.width = `${COLUMN_WIDTHS[name]}px`;
+    cell.style.left = `${STICKY_OFFSETS[name]}px`;
+    stickyCells[name] = cell;
+    head.append(cell);
   }
 
-  /** @type {Array<{cell: HTMLElement, alias: HTMLElement, acc: HTMLElement}>} */
-  const probHeaders = timeline.problems.map((problem) => {
-    const cell = document.createElement('th');
-    cell.className = 'prob';
-    const chip = document.createElement('span');
-    chip.className = 'prob-chip';
-    const swatch = document.createElement('span');
-    swatch.className = 'prob-swatch';
-    if (problem.color) swatch.style.background = problem.color;
+  /**
+   * One stable element per problem, re-ordered in place so the header slides
+   * between orderings. All of them are rendered; only the order changes.
+   * @type {Array<{cell: HTMLElement, alias: HTMLElement, count: HTMLElement, problem: object}>}
+   */
+  const headers = timeline.problems.map((problem) => {
+    const cell = document.createElement('div');
+    cell.className = 'head-cell prob';
+    cell.style.width = `${COLUMN_WIDTHS.solved}px`;
+    if (problem.color) cell.style.setProperty('--prob-color', problem.color);
+
     const alias = document.createElement('span');
     alias.className = 'prob-alias';
     alias.textContent = '?';
-    const acc = document.createElement('span');
-    acc.className = 'prob-acc';
-    chip.append(swatch, alias, acc);
-    cell.append(chip);
-    cell.title = problem.title
-      ? `${problem.alias} — ${problem.title}`
-      : String(problem.alias ?? '');
-    headRow.append(cell);
-    return { cell, alias, acc, problem };
+
+    const count = document.createElement('span');
+    count.className = 'prob-count';
+    count.textContent = '0';
+
+    cell.append(alias, count);
+    return { cell, alias, count, problem };
   });
 
-  thead.append(headRow);
-  table.append(thead);
+  // The header's problem cells live in their own flex row so re-ordering them
+  // cannot disturb the sticky identity columns.
+  const headProbs = document.createElement('div');
+  headProbs.className = 'board__head-probs';
+  headProbs.style.left = `${stickyWidth}px`;
+  for (const entry of headers) headProbs.append(entry.cell);
+  head.append(headProbs);
 
-  const tbody = document.createElement('tbody');
+  inner.append(head);
+  container.append(inner);
 
-  // Scroll spacers keep the container's scrollable height correct.
-  const makeSpacer = () => {
-    const tr = document.createElement('tr');
-    tr.className = 'spacer';
-    const td = document.createElement('td');
-    td.colSpan = totalColumns;
-    tr.append(td);
-    return tr;
-  };
-  const spacerTop = makeSpacer();
-  const spacerBottom = makeSpacer();
-  tbody.append(spacerTop, spacerBottom);
-  table.append(tbody);
-  container.append(table);
-
-  // ---- render state -------------------------------------------------------
+  // ---- state --------------------------------------------------------------
   let rows = [];
   let frame = null;
-  /** team index -> row element currently in the DOM */
+  /** team index -> row element (kept for the lifetime of the board) */
   const rendered = new Map();
-  let windowStart = -1;
-  let windowCount = 0;
-
+  let lastHeaderOrder = '';
   let filterText = '';
   let pinnedTeamId = null;
-  let lastHeaderKey = '';
 
   const matchesFilter = (row) => filterText.length > 0 && (
     row.team.name.toLowerCase().includes(filterText)
@@ -158,168 +181,201 @@ export function createBoard({ container, timeline }) {
   );
 
   function createRow() {
-    const tr = document.createElement('tr');
-    const cells = new Array(totalColumns);
+    const tr = document.createElement('div');
+    tr.className = 'board__row';
+    tr.style.height = `${ROW_HEIGHT}px`;
+    tr.style.width = `${Math.max(totalWidth, 100)}px`;
+
+    const cells = new Array(STICKY.length + problemCount);
     for (let i = 0; i < STICKY.length; i++) {
-      const td = document.createElement('td');
-      td.className = `col-${STICKY[i]}`;
+      const name = STICKY[i];
+      const td = document.createElement('div');
+      td.className = `row-cell col-${name}`;
+      td.style.width = `${COLUMN_WIDTHS[name]}px`;
+      td.style.left = `${STICKY_OFFSETS[name]}px`;
       cells[i] = td;
       tr.append(td);
     }
     for (let p = 0; p < problemCount; p++) {
-      const td = document.createElement('td');
+      const td = document.createElement('div');
       td.className = 'cell';
+      td.style.width = `${COLUMN_WIDTHS.solved}px`;
       cells[STICKY.length + p] = td;
       tr.append(td);
     }
     tr._cells = cells;
+    tr._cellsAttached = true;
     return tr;
   }
 
-  /**
-   * Fill one row element from a board row. Cells are physically reordered
-   * outside the DOM (via `replaceChildren`) only when the order changed.
-   */
+  function setText(node, text) {
+    if (node.textContent !== text) node.textContent = text;
+  }
+
+  /** Update text, flashing the cell when the value actually changed. */
+  function pulseText(node, text) {
+    if (node.textContent === text) return;
+    node.textContent = text;
+    if (text === '') return;
+    node.classList.remove('is-changed');
+    void node.offsetWidth; // restart the animation
+    node.classList.add('is-changed');
+  }
+
+  /** Fill one row element from a board row. */
   function renderRow(tr, row) {
-    const { reveal, visibleSec, state } = frame;
+    const { state, visibleSec, stats } = frame;
     const cells = tr._cells;
-    const order = row.columns;
 
-    tr.className = row.official ? '' : 'is-unofficial';
+    let className = 'board__row';
+    if (!row.official) className += ' is-unofficial';
     if ((pinnedTeamId !== null && row.team.id === pinnedTeamId) || matchesFilter(row)) {
-      tr.classList.add('is-match');
+      className += ' is-match';
+    } else if (filterText) {
+      className += ' is-dimmed';
     }
-    tr.dataset.teamId = row.team.id;
+    if (tr.className !== className) tr.className = className;
+    if (tr.dataset.teamId !== row.team.id) tr.dataset.teamId = row.team.id;
 
-    const rankCell = cells[0];
-    const rankText = row.official ? String(row.rank) : '—';
-    if (rankCell.textContent !== rankText) rankCell.textContent = rankText;
-
-    const teamCell = cells[1];
-    if (teamCell.textContent !== row.team.name) teamCell.textContent = row.team.name;
+    setText(cells[0], row.official ? String(row.rank) : '—');
+    setText(cells[1], row.team.name);
     const title = row.team.members?.length ? row.team.members.join(' / ') : row.team.name;
-    if (teamCell.title !== title) teamCell.title = title;
+    if (cells[1].title !== title) cells[1].title = title;
+    setText(cells[2], row.team.organization ?? '');
+    pulseText(cells[3], String(row.solved));
+    setText(cells[4], String(Math.floor(row.penalty / 60)));
 
-    const orgCell = cells[2];
-    const org = row.team.organization ?? '';
-    if (orgCell.textContent !== org) orgCell.textContent = org;
-
-    const solvedCell = cells[3];
-    const solvedText = String(row.solved);
-    if (solvedCell.textContent !== solvedText) solvedCell.textContent = solvedText;
-
-    const penaltyCell = cells[4];
-    const penaltyText = String(Math.floor(row.penalty / 60));
-    if (penaltyCell.textContent !== penaltyText) penaltyCell.textContent = penaltyText;
-
+    const order = row.columns;
     for (let position = 0; position < problemCount; position++) {
       const probIdx = order[position];
       const td = cells[STICKY.length + position];
       const content = cellContent(state, row.teamIdx, probIdx, frame.triesFallback);
+      const revealed = visibleSec >= stats.aliasRevealed[probIdx];
 
-      if (td.className !== content.className) td.className = content.className;
-      if (td.textContent !== content.text) td.textContent = content.text;
+      // A solve on a still-hidden problem is shown as solved but tinted
+      // differently, so it is visually clear the problem number is unknown.
+      const cls = revealed || !content.solved
+        ? content.className
+        : `${content.className} cell--hidden-solve`;
 
-      const prob = String(probIdx);
-      if (td.dataset.prob !== prob) td.dataset.prob = prob;
-      const isRevealed = reveal.revealSec[probIdx] !== Infinity
-        && visibleSec >= reveal.revealSec[probIdx];
-      if (td.dataset.revealed !== (isRevealed ? '1' : '0')) {
-        td.dataset.revealed = isRevealed ? '1' : '0';
+      if (td.className !== cls) td.className = cls;
+      if (td.dataset.prob !== String(probIdx)) td.dataset.prob = String(probIdx);
+      if (td.dataset.revealed !== (revealed ? '1' : '0')) {
+        td.dataset.revealed = revealed ? '1' : '0';
       }
+      pulseText(td, content.text);
     }
 
     tr._order = order;
   }
 
-  /** Problem header shows every problem in problem-number order. */
+  /** Header: live solve-count order, live counts, colour only when revealed. */
   function renderHeader() {
-    const { reveal, visibleSec } = frame;
-    const headerKey = probHeaders
-      .map((entry, i) => (reveal.revealSec[i] !== Infinity && visibleSec >= reveal.revealSec[i] ? 1 : 0))
-      .join('');
-    if (headerKey === lastHeaderKey) return;
-    lastHeaderKey = headerKey;
+    const { stats, visibleSec } = frame;
 
-    for (let i = 0; i < probHeaders.length; i++) {
-      const { cell, alias, acc, problem } = probHeaders[i];
-      const shown = reveal.revealSec[i] !== Infinity && visibleSec >= reveal.revealSec[i];
-      const aliasText = shown ? String(problem.alias ?? '?') : '?';
-      if (alias.textContent !== aliasText) alias.textContent = aliasText;
-      const accText = shown && Number.isFinite(problem.accepted) ? String(problem.accepted) : '';
-      if (acc.textContent !== accText) acc.textContent = accText;
-      cell.classList.toggle('is-hidden', !shown);
-      cell.title = shown
-        ? `${problem.alias}${problem.title ? ` — ${problem.title}` : ''}`
-        : '题号尚未显示（过题队伍数未达门限）';
+    const orderKey = stats.order.join(',');
+    if (orderKey !== lastHeaderOrder) {
+      lastHeaderOrder = orderKey;
+      const fragment = document.createDocumentFragment();
+      for (const probIdx of stats.order) fragment.append(headers[probIdx].cell);
+      headProbs.append(fragment);
+    }
+
+    for (let probIdx = 0; probIdx < problemCount; probIdx++) {
+      const entry = headers[probIdx];
+      const solved = stats.solved[probIdx] ?? 0;
+      const revealed = visibleSec >= stats.aliasRevealed[probIdx];
+
+      // Flash once when a problem's alias first appears.
+      if (revealed && entry._wasRevealed === false) {
+        entry.cell.classList.add('is-just-revealed');
+      } else if (!revealed) {
+        entry.cell.classList.remove('is-just-revealed');
+      }
+      entry._wasRevealed = revealed;
+
+      setText(entry.alias, revealed ? String(entry.problem.alias ?? '?') : '?');
+      pulseText(entry.count, String(solved));
+
+      // Toggle the state class rather than assigning the whole className, so
+      // the reveal animation is never clobbered mid-flight.
+      entry.cell.classList.toggle('is-hidden', !revealed);
+
+      const title = headerTitle(entry.problem, revealed, solved);
+      if (entry.cell.title !== title) entry.cell.title = title;
+      if (entry.cell.dataset.count !== String(solved)) entry.cell.dataset.count = String(solved);
     }
   }
 
   function viewportRowCount() {
     const height = container.clientHeight || 600;
-    return Math.max(1, Math.ceil((height - HEAD_HEIGHT) / ROW_HEIGHT) + OVERSCAN * 2);
-  }
-
-  function ensureRow(teamIdx) {
-    let tr = rendered.get(teamIdx);
-    if (!tr) {
-      tr = createRow();
-      rendered.set(teamIdx, tr);
-    }
-    return tr;
+    return Math.max(1, Math.ceil(height / ROW_HEIGHT) + OVERSCAN * 2);
   }
 
   /** Repaint the visible window. */
   function paint() {
-    if (!frame || rows.length === 0) {
-      spacerTop.firstChild.style.height = '0px';
-      spacerBottom.firstChild.style.height = '0px';
-      return;
-    }
+    if (!frame) return;
 
     const total = rows.length;
-    const first = Math.max(0, Math.floor(container.scrollTop / ROW_HEIGHT) - OVERSCAN);
-    const count = Math.min(total - first, viewportRowCount());
+    inner.style.height = `${HEAD_HEIGHT + total * ROW_HEIGHT}px`;
 
-    spacerTop.firstChild.style.height = `${first * ROW_HEIGHT}px`;
-    spacerBottom.firstChild.style.height = `${Math.max(0, total - first - count) * ROW_HEIGHT}px`;
+    const first = Math.max(0, Math.floor(container.scrollTop / ROW_HEIGHT) - OVERSCAN);
+    const count = total === 0 ? 0 : Math.min(total - first, viewportRowCount());
 
     const nextElements = new Array(count);
     const keep = new Set();
 
     for (let i = 0; i < count; i++) {
       const row = rows[first + i];
-      const tr = ensureRow(row.teamIdx);
-      keep.add(row.teamIdx);
-      // The column order is per team, so apply it before filling the cells.
-      if (tr._domOrder !== row.columns) {
-        tr.replaceChildren(...tr._cells);
-        tr._domOrder = row.columns;
+      let tr = rendered.get(row.teamIdx);
+      if (!tr) {
+        tr = createRow();
+        rendered.set(row.teamIdx, tr);
       }
+      keep.add(row.teamIdx);
+
+      // Re-apply the team's own column order only when it actually changed.
+      if (tr._order !== row.columns) {
+        tr.replaceChildren(...tr._cells);
+        tr._order = row.columns;
+      }
+      // `transform` (not `top`) so rank swaps can be animated by CSS.
+      tr.style.transform = `translateY(${HEAD_HEIGHT + (first + i) * ROW_HEIGHT}px)`;
       renderRow(tr, row);
       nextElements[i] = tr;
     }
 
-    // Drop elements that scrolled out of the window.
-    let pruned = false;
-    for (const [teamIdx, tr] of rendered) {
-      if (!keep.has(teamIdx)) {
-        rendered.delete(teamIdx);
-        tr.remove();
-        pruned = true;
+    reconcile(nextElements);
+    prune(keep, nextElements);
+  }
+
+  /**
+   * Make the DOM order match `nextElements`.
+   *
+   * Elements are reused across updates, so this moves nodes rather than
+   * rebuilding them: a rank swap is a single insertBefore, and CSS transitions
+   * the two rows to their new positions instead of flickering.
+   */
+  function reconcile(nextElements) {
+    let cursor = head.nextSibling;
+    for (const tr of nextElements) {
+      if (tr === cursor) {
+        cursor = tr.nextSibling;
+        continue;
       }
+      inner.insertBefore(tr, cursor);
     }
+  }
 
-    if (pruned || count !== windowCount || first !== windowStart) {
-      const fragment = document.createDocumentFragment();
-      fragment.append(spacerTop);
-      for (const tr of nextElements) fragment.append(tr);
-      fragment.append(spacerBottom);
-      tbody.replaceChildren(fragment);
+  /** Detach rows that are neither in the window nor requested again. */
+  function prune(keep, nextElements) {
+    const kept = new Set(nextElements);
+    for (const [teamIdx, tr] of rendered) {
+      if (keep.has(teamIdx)) continue;
+      if (kept.has(tr)) continue;
+      rendered.delete(teamIdx);
+      tr.remove();
     }
-
-    windowStart = first;
-    windowCount = count;
   }
 
   let scheduled = false;
@@ -339,7 +395,6 @@ export function createBoard({ container, timeline }) {
   container.addEventListener('scroll', schedulePaint, { passive: true });
 
   return {
-    /** Update the board from a session frame. */
     render(nextFrame) {
       frame = nextFrame;
       rows = nextFrame.rows;
@@ -349,7 +404,6 @@ export function createBoard({ container, timeline }) {
 
     setPinnedTeam(teamId) {
       pinnedTeamId = teamId ?? null;
-      windowStart = -1;
       schedulePaint();
     },
 
@@ -358,22 +412,15 @@ export function createBoard({ container, timeline }) {
       schedulePaint();
     },
 
-    /** Scroll so that a team is visible. */
     scrollToTeam(teamIdx) {
       const index = rows.findIndex((row) => row.teamIdx === teamIdx);
       if (index < 0) return;
-      container.scrollTop = Math.max(0, index * ROW_HEIGHT - container.clientHeight / 3);
-      schedulePaint();
-    },
-
-    scrollToIndex(index) {
       container.scrollTop = Math.max(0, index * ROW_HEIGHT);
       schedulePaint();
     },
 
     get rowCount() { return rows.length; },
     get rows() { return rows; },
-    get contentWidth() { return table.scrollWidth; },
 
     destroy() {
       container.removeEventListener('scroll', schedulePaint);

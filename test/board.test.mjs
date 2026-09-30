@@ -10,27 +10,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { cellContent } from '../web/board.mjs';
-import { columnOrder, replayTo, resolveReveal } from '../shared/rules.mjs';
+import { cellContent, headerTitle } from '../web/board.mjs';
+import { columnOrder, problemStatus, replayTo } from '../shared/rules.mjs';
 import { RESULT } from '../shared/srk.mjs';
 
-/** Minimal wire timeline helper (mirrors the one in rules.test.mjs). */
-function makeTimeline({ teams = 1, problems = 1, events = [], revealSec = [], triesFallback = null }) {
+/**
+ * Minimal wire timeline helper.
+ *
+ * Reveal is derived from the live solve count, so tests control the threshold
+ * through the team count: `min(floor(N*0.2), 50)`. With 10 teams the threshold
+ * is 2.
+ */
+function makeTimeline({ teams = 10, problems = 1, events = [], triesFallback = null }) {
   return {
     version: 1,
     uk: 't',
     name: 't',
     contest: { durationSec: 18000, frozenDurationSec: 0 },
-    problems: Array.from({ length: problems }, (_, i) => ({ alias: String.fromCharCode(65 + i), color: null })),
+    problems: Array.from({ length: problems }, (_, i) => ({
+      alias: String.fromCharCode(65 + i), title: `Problem ${i}`, color: null,
+    })),
     teams: Array.from({ length: teams }, (_, i) => ({
       id: String(i), name: `T${i}`, organization: '', official: true, members: [], markers: [],
     })),
-    reveal: {
-      ratio: 0.2,
-      min: 50,
-      all: { teamsRanked: teams, threshold: teams, revealSec: Array.from({ length: problems }, (_, i) => revealSec[i] ?? Infinity) },
-      official: { teamsRanked: teams, threshold: teams, revealSec: Array.from({ length: problems }, (_, i) => revealSec[i] ?? Infinity) },
-    },
+    reveal: { ratio: 0.2, min: 50 },
     sorter: {
       algorithm: 'ICPC',
       penaltySec: 1200,
@@ -42,6 +45,12 @@ function makeTimeline({ teams = 1, problems = 1, events = [], revealSec = [], tr
     triesFallback,
     coverage: { exact: true, events: events.length, droppedEvents: 0 },
   };
+}
+
+/** Replayed state plus live problem stats at `tSec`. */
+function replay(timeline, tSec) {
+  const { state } = replayTo(timeline, tSec);
+  return { state, stats: problemStatus(state, tSec) };
 }
 
 test('cellContent renders a solve as minutes and in-cell wrong attempts', () => {
@@ -162,21 +171,20 @@ test('cellContent uses the legacy fallback only when it is larger', () => {
 });
 
 test('a row rendered in column order shows the right cell per position', () => {
-  // 3 problems: P0 revealed and solved late, P1 hidden and solved early,
-  // P2 hidden and attempted only.
+  // 10 teams => threshold 2. P0 is revealed by two other solvers; P1 and P2
+  // stay hidden for team 0.
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 3,
-    revealSec: [0, Infinity, Infinity],
     events: [
-      [200, 0, 1, RESULT.AC],
-      [500, 0, 2, RESULT.WA],
-      [1000, 0, 0, RESULT.AC],
+      [50, 5, 0, RESULT.AC], [60, 6, 0, RESULT.AC], // reveal P0
+      [200, 0, 1, RESULT.AC], // team 0: hidden solve
+      [500, 0, 2, RESULT.WA], // team 0: hidden attempt
+      [1000, 0, 0, RESULT.AC], // team 0: revealed solve
     ],
   });
-  const { state } = replayTo(timeline, 9999);
-  const reveal = resolveReveal(timeline, 'all');
-  const order = columnOrder(state, 0, 9999, reveal);
+  const { state, stats } = replay(timeline, 9999);
+  const order = columnOrder(state, 0, 9999, stats.aliasRevealed);
 
   // Expected: revealed P0 first, then hidden solve P1, then hidden attempt P2.
   assert.deepEqual(order, [0, 1, 2]);
@@ -188,20 +196,27 @@ test('a row rendered in column order shows the right cell per position', () => {
 
 test('column order and cell content stay consistent when the order is not identity', () => {
   const timeline = makeTimeline({
-    teams: 1,
+    teams: 10,
     problems: 4,
-    revealSec: [Infinity, Infinity, Infinity, Infinity],
     events: [
       [100, 0, 3, RESULT.WA], // latest submission 100 -> first in bucket 3
       [900, 0, 0, RESULT.WA],
       [500, 0, 1, RESULT.AC], // solved at 500 -> bucket 2
     ],
   });
-  const { state } = replayTo(timeline, 9999);
-  const order = columnOrder(state, 0, 9999, resolveReveal(timeline, 'all'));
+  const { state, stats } = replay(timeline, 9999);
+  const order = columnOrder(state, 0, 9999, stats.aliasRevealed);
   // bucket 2: P1 (solved) ; bucket 3: P3 (100s), P0 (900s) ; bucket 4: P2
   assert.deepEqual(order, [1, 3, 0, 2]);
 
   const rendered = order.map((probIdx) => cellContent(state, 0, probIdx).text);
   assert.deepEqual(rendered, ['8', '-1', '-1', '']);
+});
+
+test('headerTitle explains a hidden problem and reports live counts', () => {
+  assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7), /未达门限/);
+  assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7), /7 队/);
+  const shown = headerTitle({ alias: 'A', title: 'Alpha' }, true, 123);
+  assert.match(shown, /A — Alpha/);
+  assert.match(shown, /123 队/);
 });

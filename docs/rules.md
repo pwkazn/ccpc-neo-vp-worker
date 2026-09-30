@@ -46,38 +46,47 @@
 **形式化**
 
 ```
-R = max( ⌊N × ratio⌋ , min )              ratio 默认 0.2，min 默认 50
-revealSec[p] = min{ t : |{ team : 该队在 t 时刻前已 AC 题 p }| ≥ R }
-revealed(p, T) ⇔ revealSec[p] ≠ ∞ ∧ T ≥ revealSec[p]
+R = min( ⌊N × ratio⌋ , min )               ratio 默认 0.2，min 默认 50
+R = max(1, R)                              R 最小为 1，避免 R=0 时“零人过题即显示”
+revealSec[p] = min{ t : |{ 已 AC 题 p 的计数队伍 }| ≥ R }
+revealed(p, T) ⇔ T ≥ revealSec[p]
 ```
 
-- `R` 在**比赛开始时**一次性确定（`N` 取榜单总队伍数，不随比赛进行变化）。
-- 计数单位是**队伍数**（去重），不是 AC 次数。
-- **只统计 AC**：仅提交过、未 AC 的队伍不计入 `R`。
-- `revealSec[p] = ∞` 表示全场都不显示题号 —— 这是合法的预期结果，不做特殊兜底。
-- 计数范围可选「全部队伍」或「仅官方队伍」（`user.official !== false`），网页可切换。两者都会预计算。
+- **是 `min` 不是 `max`**：50 队是**上界**，`⌊N×20%⌋` 是实际门限。小比赛按 20% 揭示，大比赛封顶 50 队。
+  早期版本误用 `max`，导致 2170 队的比赛门限变成 434 队、绝大多数题号几乎全场不可见。
+  实测修正后 2026 CCPC 网络预选赛（2170 队）门限 = 50，题号随时间自然浮现。
+- `N` 取**榜单队伍数**，可选「全部队伍」或「仅官方队伍」两种口径（网页可切换）。
+- 计数单位是**去重的队伍数**，不是 AC 次数；**只统计 AC**，仅提交未过的不计入。
+- 门限在比赛开始时确定（`N` 不随比赛进行变化）。
+- 全场无人达到 `R` 的题（例如只有 1 支队伍通过的题）**始终不显示题号** —— 这是预期行为，不做兜底。
+
+**关键点：揭示用的是「截至当前显示时刻的实时过题队数」。**
+`problems[p].statistics.accepted` 是发布时的快照，实测可能与回放统计不同（该场 M 题：官方 423，回放 434）。所以：
+
+- 运行时**不**读取预计算的 `revealSec`，而是由回放状态里的计数器 `CountedSolves` 逐秒求出实时值；
+- 服务器预计算的 `reveal.all/official.revealSec` 只用于自描述、`/api/diagnose` 展示与回归测试断言。
 
 **实现**
 
 | 步骤 | 位置 |
 | --- | --- |
-| 预计算门限与揭示时刻 | `server/build-timeline.mjs` → `computeReveal()` |
-| 运行时判定 | `shared/rules.mjs` → `resolveReveal()`、`isRevealed()` |
-| 单元格是否暴露别名 | `shared/rules.mjs` → `cellInfo().alias`（未揭示返回 `null`） |
-| 界面呈现 | `web/board.mjs` → 列头未揭示时显示 `?`，无颜色泄漏 |
+| 门限公式 | `shared/rules.mjs` → `revealThreshold()` |
+| 实时过题队数计数 | `shared/rules.mjs` → `CountedSolves`、`applyEvent()` |
+| 每帧实时状态（计数 / 是否揭示 / 列头顺序） | `shared/rules.mjs` → `problemStatus()` |
+| 预计算（自描述 + 测试用） | `server/build-timeline.mjs` → `computeReveal()` |
+| 单元格是否暴露别名 | `shared/rules.mjs` → `cellInfo().alias` |
+| 界面呈现 | `web/board.mjs` → 列头未揭示显示 `?` 且不着色 |
 
-**关键区分：用「实时统计」而不是「官方快照」判断揭示。**
-`problems[p].statistics.accepted` 是发布时的快照，实测可能与回放统计不同（2026 网络预选赛的 M 题：官方 423，回放 434）。揭示必须按回放得到的实时过题队数判断 —— 这才是现场看榜的语义。
-
-**测试**：`test/rules.test.mjs` → "computeReveal reveals a problem the moment the threshold is reached"、"computeReveal ignores uncounted teams"、"isRevealed flips exactly at the reveal second"、"an unrevealed problem keeps its alias hidden in cellInfo"；`test/e2e.test.mjs` → "reveal times follow the live accepted count"（在真实数据上重算计数并与预计算结果逐一比对）。
+**测试**：`test/rules.test.mjs` → "revealThreshold is the smaller of floor(N * 20%) and 50"、"1000-team fixture reveals at 50 solves, not 200"、"a problem is revealed exactly when the live count reaches the threshold"、"the official scope ignores unofficial solvers"；`test/e2e.test.mjs` → "reveal times follow the live accepted count"（真实数据上重算并与预计算逐一比对）。
 
 ---
 
 ## 2. 榜单不按统一题目顺序展示（说明文档第 2 条）
 
-这是第 3 条的结论：**列顺序因队而异**，因此列位置不代表题目身份。
+这是第 3 条的结论：**行内列顺序因队而异**，因此列位置不代表题目身份。
 
-**实现**：`web/board.mjs` 中 `<thead>` 始终按题目下标升序排列（列头即「题目槽位」），每个 `<tr>` 内部按该队自己的顺序重排 `<td>`，并在 `td.dataset.prob` 上保存真实题目下标。
+**实现**：`web/board.mjs` 中每行 `<tr>` 按该队自己的顺序重排单元格，并在 `td.dataset.prob` 上保存真实题目下标；
+顶部题号栏（规则 5）**按实时过题数排序**，也不固定为题目下标顺序，因此同样不能由列位置推断题号。
 
 ---
 
@@ -129,6 +138,32 @@ revealed(p, T) ⇔ revealSec[p] ≠ ∞ ∧ T ≥ revealSec[p]
 
 ---
 
+## 5. 顶部题号栏（实时过题数与排序）
+
+顶部每个**题目列**同时表达三件事：
+
+1. **题号**：已揭示显示别名（`A`、`B`…），未揭示显示 `?`；
+2. **实时过题数**：截至**当前显示时刻**的去重过题队伍数（`statistics.accepted` 那个最终快照**不用**）；
+3. **底色**：仅在已揭示时着色（用 SRK 的 `problems[].style.backgroundColor`）；未揭示一律不着色，避免从颜色推断题号。
+
+**排序**：永远按**实时过题数降序**，同数按题目下标升序。因此：
+
+- 顺序**不固定**，随时间变化；每有队伍过题就可能改变；
+- 封榜期间顺序也**冻结**（因为显示时刻被钉在封榜点）；
+- 因为顺序会变，顶部列位置同样**不能**用来推断题号。
+
+**实现**
+
+| 步骤 | 位置 |
+| --- | --- |
+| 实时计数 / 揭示集合 / 顺序 | `shared/rules.mjs` → `problemStatus()` 返回 `solved`、`aliasRevealed`、`order` |
+| 每帧传入界面 | `shared/live.mjs` → `frame.stats` |
+| 排序与着色渲染 | `web/board.mjs` → `renderHeader()`、`headerTitle()` |
+
+**测试**：`test/rules.test.mjs` → "the header orders problems by live solve count, ties by number"、"the header order is stable for equal counts"、"the header re-sorts as counts change over time"、"createEpochReplay keeps solve counts correct when seeking backwards"；`test/board.test.mjs` → "headerTitle explains a hidden problem and reports live counts"。
+
+---
+
 ## 5. 计分（ICPC 规则 + 时间精度）
 
 > 榜单仍会显示每支队伍的 AC 题数、总罚时。
@@ -171,25 +206,47 @@ totalPenalty[g] = floor_to_precision(penalty[g])
 
 ---
 
-## 7. 封榜与揭榜（说明文档第 5 条）
+## 7. 封榜与解封（说明文档第 5 条）
 
 > 比赛最后 1 小时封榜，封榜后榜单显示与原 XCPC 模式相同。
 
 **形式化**
 
 ```
-frozenAt = duration − frozenDuration          （仅当 frozenDuration > 0）
-auto 模式：
-    T ≤ frozenAt  → 可见时间 = T，未封榜
-    T >  frozenAt → 可见时间 = frozenAt，已封榜
-    比赛结束（T ≥ duration）→ 自动揭榜，可见时间 = duration
-never 模式：全程可见时间 = T，从不封榜
+usesFreeze = (freezeMode ≠ never) ∧ frozenDuration > 0
+frozenAt   = duration − frozenDuration              （usesFreeze 时）
+
+!usesFreeze          → visibleSec = clamp(T)
+T ≤ frozenAt         → visibleSec = clamp(T)         frozen = false
+T >  frozenAt ∧ 未解封 → visibleSec = frozenAt        frozen = true,  revealPending = true
+T >  frozenAt ∧ 已解封 → visibleSec = clamp(T)        frozen = false
 ```
 
-封榜期间**不再揭示题号、不再更新榜单、不发气球**，因为可见时间被固定在 `frozenAt`，回放状态也冻结在那里。揭榜就是把可见时间放开到真实时间。
+- **面板时间（`T`）与榜单时间（`visibleSec`）分离**：封榜期间真实比赛时钟继续走（`T` 继续增大），但榜单被钉在 `frozenAt`。界面显示的是**榜单时间**，避免"时钟在走、榜单不动"的错觉。
+- 封榜期间：不再揭示新题号、过题数不再增长、行内顺序不再变化、顶部顺序冻结 —— 因为一切都从 `visibleSec` 的回放状态派生，而它被钉住了。
+- **解封**有两种触发：比赛到达 `duration` 时**自动解封**；或手动点「揭榜」。解封后 `visibleSec` 立刻放开到真实时间，该显示的全显示。
+- 「关闭封榜」模式（`freezeMode = never`）下 `usesFreeze` 为假，全程实时。
+- `frozenDuration = 0` 的场次（如 2026 CCPC 网络预选赛）本就没有封榜，等价于全程实时。
 
-**实现**：`resolveFreeze()`（纯函数）；`createSession()` 里的 `isRevealed()`/`freezeState()`；界面 `web/app.mjs` 的「揭榜」按钮与自动揭榜。
-**测试**："resolveFreeze clips the board once the freeze starts"、"with reveal unlocks the true final board"、"never freezes when the mode is never"、"is a no-op for contests without a freeze window"、"clamps beyond the contest duration"、"session goes through countdown, running, frozen and revealed"、"a frozen session stops reflecting new events"。
+**实现**
+
+| 步骤 | 位置 |
+| --- | --- |
+| 可见时间裁剪 | `shared/replay.mjs` → `resolveFreeze()`（纯函数） |
+| 自动解封判定 | `shared/live.mjs` → `isRevealed()` |
+| 阶段状态机 | `shared/live.mjs` → `phase()`（`pending/running/frozen/ended`） |
+| 界面徽标与按钮 | `web/app.mjs` → `renderBoard()` |
+
+**测试**：`test/rules.test.mjs` → "resolveFreeze clips the board once the freeze starts"、"with reveal unlocks the true board"、"never freezes when the mode is never"、"is a no-op for contests without a freeze window"、"clamps beyond the contest duration"、"session goes through countdown, running, frozen and revealed"、"a frozen session stops reflecting new events, and unfreezing reveals them"、"freeze mode never keeps the board live to the end"、"a whole contest freezes, holds, then fully unfreezes at the end"。
+
+真实数据核对：`icpc2026invitational-shenyang`（时长 18000s，冻结 3600s → `frozenAt = 14400`）：
+
+```
+t=14390   running  visible=14390  revealed=false
+t=14410   frozen   visible=14400  revealed=false   榜单钉住
+t=17995   frozen   visible=14400  revealed=false   真实时钟在走，榜单不动
+t=18001   ended    visible=18000  revealed=true    自动解封，题号与计数全部放开
+```
 
 ---
 

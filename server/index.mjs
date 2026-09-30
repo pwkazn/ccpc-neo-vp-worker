@@ -260,6 +260,16 @@ export async function createServer(options) {
         return;
       }
 
+      // Verifier sink. Browsers tear a page down as soon as a load-time
+      // screenshot is captured, so an automated UI check reports its findings
+      // here and they land in the terminal instead of a racing screenshot.
+      if (pathname === '/api/__report') {
+        const reported = url.searchParams.get('r') ?? '';
+        process.stderr.write(`[ccpc-neo-vp:ui] ${reported}\n`);
+        res.writeHead(204, { 'access-control-allow-origin': '*' }).end();
+        return;
+      }
+
       if (pathname === '/api/health') {
         sendJson(req, res, 200, {
           ok: true,

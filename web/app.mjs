@@ -100,11 +100,23 @@ async function getJson(url) {
   return response.json();
 }
 
-/** Fetch and gunzip the timeline payload. */
+/**
+ * Fetch the wire timeline for a contest.
+ *
+ * The server does not use `Content-Encoding` for its JSON — it always sends
+ * plain JSON with an accurate `Content-Length`. Letting the browser handle a
+ * hand-rolled gzip stream was fragile: whether the encoding header is visible
+ * to JS differs between engines, and decoding an already-decoded body throws.
+ * A ~0.9 MB JSON body over loopback is not worth that risk.
+ *
+ * `res.json()` is still used via an explicit text step so a malformed payload
+ * produces a clear message instead of an opaque parse failure.
+ */
 async function fetchTimeline(uk) {
   const response = await fetch(`/api/timeline?uk=${encodeURIComponent(uk)}`, {
-    headers: { accept: 'application/json', 'accept-encoding': 'gzip' },
+    headers: { accept: 'application/json' },
   });
+
   if (!response.ok) {
     let detail = `HTTP ${response.status}`;
     let code = null;
@@ -118,16 +130,24 @@ async function fetchTimeline(uk) {
     throw error;
   }
 
-  const encoding = response.headers.get('content-encoding') ?? '';
-  let text;
-  if (encoding.includes('gzip') && response.body && typeof DecompressionStream === 'function') {
-    const stream = response.body.pipeThrough(new DecompressionStream('gzip'));
-    text = await new Response(stream).text();
-  } else {
-    text = await response.text();
+  const text = await response.text();
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch (error) {
+    const parseError = new Error(
+      `榜单响应不是合法 JSON（${text.length} 字节）：${error.message}`,
+    );
+    parseError.code = 'bad_payload';
+    throw parseError;
   }
 
-  const body = JSON.parse(text);
+  if (!body?.data?.timeline) {
+    const shapeError = new Error('榜单响应缺少 data.timeline');
+    shapeError.code = 'bad_payload';
+    throw shapeError;
+  }
+
   return { timeline: body.data.timeline, cached: body.data.cached, stale: body.data.stale };
 }
 

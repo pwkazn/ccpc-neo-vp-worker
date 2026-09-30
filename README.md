@@ -157,7 +157,7 @@ http://127.0.0.1:5173/?uk=ccpc2026preliminary&start=1790785531000&freeze=auto
 
 榜单文件格式是 **Standard Ranklist (SRK) v0.3.13**，规范见 [algoux/standard-ranklist](https://github.com/algoux/standard-ranklist)。
 
-服务端做三件事：抓取、把 SRK 归一化成一份紧凑的「时间轴」、按 sha256 缓存到磁盘。第二次打开同一场比赛是秒开（本地缓存 + gzip，约 233 KB）。
+服务端做三件事：抓取、把 SRK 归一化成一份紧凑的「时间轴」、按 sha256 缓存到磁盘。第二次打开同一场比赛是秒开（纯本地缓存读取，无网络请求）。
 
 **缓存位置**：`$XDG_CACHE_HOME/ccpc-neo-vp/`（默认 `~/.cache/ccpc-neo-vp/`），含 `contests.json`、`srk/`、`timeline/`。用 `--cache-info` 看占用，`--clear-cache` 清空。
 
@@ -241,7 +241,7 @@ nix run .#test-e2e     # 或 VP_E2E=1 node --test test/e2e.test.mjs
 
 ```
 server/
-  index.mjs          HTTP 服务、路由、CLI、gzip JSON
+  index.mjs          HTTP 服务、路由、CLI、keep-alive 调优
   rankland.mjs       RankLand 只读客户端（超时/退避重试）
   build-timeline.mjs SRK → 紧凑「时间轴」（两种格式都处理）
   cache.mjs          原子写磁盘缓存
@@ -268,7 +268,14 @@ docs/rules.md        规则形式化说明与测试对照
 ## FAQ
 
 **点了「加载并开始」后提示「加载失败：The operation was aborted.」？**
-这是旧版本在 60 秒总时长超时下中止下载的报错，已修复：现在改成「连接超时 + 读取停滞」两个看门狗，慢速下载不再被中止，失败时会给出具体原因。若你仍看到它，请更新到最新提交后重启。
+已修复，原因有两个，都出在自己实现 HTTP 细节上：
+1. 旧版本把整个下载包在一个 60 秒的 `AbortController` 总时长里，慢速线路下载 2.5 MB 榜单会被中止；
+2. 旧版本手工设置了 `Content-Encoding: gzip`，并且 Node 默认的 keep-alive 只有 5 秒 —— 浏览器可能刚好选中一个即将被关闭的连接，请求就一直没有回音，最终被浏览器自己中止。
+
+现在：总时长超时改成「连接超时 + 读取停滞」两个看门狗；JSON 响应不再手工压缩（本机回环上约 0.8 MB，无所谓），前端也不再手工解压；keep-alive 调高到 130 秒。请更新到最新提交后重启。
+
+**我该怎么确认这次真的好了？**
+在真实浏览器里实测过：加载榜单 + 渲染出榜单 **801 ms**（无中止、无报错）。你也可以自己看：启动时会打印自检地址。
 
 **下载很慢 / 一直转圈？**
 放宽超时重启：`RL_CONNECT_TIMEOUT_MS=60000 RL_STALL_TIMEOUT_MS=120000 nix run . -- --verbose`，同时打开 `/api/diagnose?uk=<比赛>` 看是哪一步慢。榜单文件约 2.5 MB。

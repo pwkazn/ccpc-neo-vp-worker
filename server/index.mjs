@@ -8,7 +8,6 @@
 
 import http from 'node:http';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { createCache } from './cache.mjs';
 import { createRanklandClient, RanklandError } from './rankland.mjs';
@@ -87,30 +86,25 @@ export function parseArgs(argv) {
   return options;
 }
 
-/** Send a JSON body, honouring Accept-Encoding when it is worth compressing. */
-function sendJson(req, res, status, payload, { cacheSeconds = 0 } = {}) {
+/**
+ * Send a JSON body.
+ *
+ * Deliberately *not* compressed. The client is a browser on the same host, and
+ * hand-rolling `Content-Encoding` here caused a body-read stall in Firefox
+ * while every other HTTP client was happy. The cost is ~0.8 MB of JSON once per
+ * contest over loopback, which is irrelevant next to the risk of an encoding
+ * the server manages by hand.
+ *
+ * Exported for tests, which assert the framing stays honest.
+ */
+export function sendJson(req, res, status, payload, { cacheSeconds = 0 } = {}) {
   const raw = Buffer.from(JSON.stringify(payload), 'utf8');
-  const headers = {
+  res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
+    'content-length': String(raw.byteLength),
     'cache-control': cacheSeconds > 0 ? `public, max-age=${cacheSeconds}` : 'no-store',
     'x-content-type-options': 'nosniff',
-  };
-
-  const acceptsGzip = /\bgzip\b/.test(req.headers['accept-encoding'] ?? '');
-  const shouldCompress = acceptsGzip && raw.byteLength > 1024;
-
-  if (shouldCompress) {
-    const body = zlib.gzipSync(raw, { level: 6 });
-    headers['content-encoding'] = 'gzip';
-    headers['vary'] = 'Accept-Encoding';
-    headers['content-length'] = String(body.byteLength);
-    res.writeHead(status, headers);
-    res.end(req.method === 'HEAD' ? undefined : body);
-    return;
-  }
-
-  headers['content-length'] = String(raw.byteLength);
-  res.writeHead(status, headers);
+  });
   res.end(req.method === 'HEAD' ? undefined : raw);
 }
 
@@ -243,6 +237,8 @@ export async function createServer(options) {
     const pathname = url.pathname;
 
     try {
+      if (verbose) log(`→ ${req.method} ${pathname}${url.search}`);
+
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         sendError(req, res, 405, 'method_not_allowed', '仅支持 GET/HEAD');
         return;
@@ -425,6 +421,15 @@ export async function createServer(options) {
       sendError(req, res, status, error.code ?? 'internal_error', error.message);
     }
   });
+
+  // Keep-alive must outlive the client's idle expectation. Node's default
+  // keepAliveTimeout is 5s, which lets a browser pick a socket that Node is
+  // about to close; the request then sits unanswered until the browser gives up
+  // with "The operation was aborted." Browsers commonly hold idle sockets for
+  // over a minute, so stay comfortably above that.
+  server.keepAliveTimeout = 130_000;
+  server.headersTimeout = 140_000;
+  server.requestTimeout = 300_000;
 
   return { server, cache, rankland, getTimeline, getContests };
 }

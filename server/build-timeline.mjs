@@ -142,6 +142,40 @@ export function countAcceptedPerProblem(ranklist, events) {
 }
 
 /**
+ * Pull the award (gold/silver/bronze) declaration out of an SRK ranklist.
+ *
+ * SRK describes awards through an ICPC rank series whose segments carry a
+ * style; the per-award counts may be stated explicitly or left for the
+ * renderer to derive from the official team count (a `[0,0,0]` placeholder).
+ *
+ * @param {object} ranklist
+ * @returns {{segments: Array<{style: string|null, title: string|null}>,
+ *            counts: number[]|null,
+ *            ratios: number[]|null}|null}
+ */
+export function extractAwards(ranklist) {
+  const series = Array.isArray(ranklist?.series) ? ranklist.series : [];
+  const icpc = series.find((entry) => entry?.rule?.preset === 'ICPC') ?? series[0];
+  const segments = Array.isArray(icpc?.segments) ? icpc.segments : [];
+  if (segments.length === 0) return null;
+
+  const counts = icpc?.rule?.options?.count?.value;
+  return {
+    segments: segments.map((segment) => ({
+      style: segment.style ?? null,
+      title: textToString(segment.title) || null,
+    })),
+    counts: Array.isArray(counts)
+      ? counts.map((value) => (Number.isFinite(value) ? Math.trunc(value) : 0))
+      : null,
+    // `ratio` is accepted as an alternative to explicit counts.
+    ratios: Array.isArray(icpc?.rule?.options?.ratio?.value)
+      ? icpc.rule.options.ratio.value.map((value) => (Number.isFinite(value) ? value : 0))
+      : null,
+  };
+}
+
+/**
  * Compute, for each problem, the earliest contest time at which its alias
  * becomes visible on the board.
  *
@@ -327,6 +361,8 @@ export function buildTimeline(ranklist, meta = {}) {
       noPenaltyResults: noPenaltyResults.map((result) => result ?? 'null'),
     },
     markers: ranklist.markers ?? [],
+    /** gold/silver/bronze declaration; the board derives the bands from it */
+    awards: extractAwards(ranklist),
   };
 }
 

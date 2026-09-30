@@ -24,6 +24,13 @@ const ROW_HEIGHT = 30;
 const HEAD_HEIGHT = 56;
 const STICKY = ['rank', 'team', 'org', 'solved', 'penalty'];
 
+/** Tooltips for the award tints. */
+const MEDAL_TITLES = Object.freeze({
+  gold: '金牌区',
+  silver: '银牌区',
+  bronze: '铜牌区',
+});
+
 /** Fixed column widths in px; mirrored in ui.css. */
 export const COLUMN_WIDTHS = Object.freeze({
   rank: 56,
@@ -155,10 +162,14 @@ export function createBoard({ container, timeline }) {
    * between orderings. All of them are rendered; only the order changes.
    * @type {Array<{cell: HTMLElement, alias: HTMLElement, count: HTMLElement, problem: object}>}
    */
-  const headers = timeline.problems.map((problem) => {
+  const headers = timeline.problems.map((problem, probIdx) => {
     const cell = document.createElement('div');
     cell.className = 'head-cell prob';
     cell.style.width = `${COLUMN_WIDTHS.solved}px`;
+    // Tag the header cell with its problem index. Header and rows must agree on
+    // which problem each column holds, and carrying the id on both sides is
+    // what makes that verifiable (this was previously missing entirely).
+    cell.dataset.prob = String(probIdx);
     if (problem.color) cell.style.setProperty('--prob-color', problem.color);
 
     const alias = document.createElement('span');
@@ -170,7 +181,7 @@ export function createBoard({ container, timeline }) {
     count.textContent = '0';
 
     cell.append(alias, count);
-    return { cell, alias, count, problem };
+    return { cell, alias, count, problem, probIdx };
   });
 
   // The header's problem cells live in their own flex row so re-ordering them
@@ -236,7 +247,7 @@ export function createBoard({ container, timeline }) {
    */
   function aliasVisible(probIdx) {
     if (frame.frozen) return true;
-    return frame.visibleSec >= frame.stats.aliasRevealed[probIdx];
+    return frame.boardSec >= frame.stats.aliasRevealed[probIdx];
   }
 
   function setText(node, text) {
@@ -276,7 +287,15 @@ export function createBoard({ container, timeline }) {
     if (tr.className !== className) tr.className = className;
     if (tr.dataset.teamId !== row.team.id) tr.dataset.teamId = row.team.id;
 
-    setText(cells[0], row.official ? String(row.rank) : '—');
+    // Rank cell, tinted by award band (gold / silver / bronze).
+    const rankText = row.official ? String(row.rank) : '—';
+    setText(cells[0], rankText);
+    const medalCls = row.medal ? `row-cell col-rank medal-${row.medal}` : 'row-cell col-rank';
+    if (cells[0].className !== medalCls) cells[0].className = medalCls;
+    if (row.medal && cells[0].title !== MEDAL_TITLES[row.medal]) {
+      cells[0].title = MEDAL_TITLES[row.medal];
+    }
+
     setText(cells[1], row.team.name);
     const title = row.team.members?.length ? row.team.members.join(' / ') : row.team.name;
     if (cells[1].title !== title) cells[1].title = title;
@@ -284,7 +303,9 @@ export function createBoard({ container, timeline }) {
     pulseText(cells[3], String(row.solved));
     setText(cells[4], String(Math.floor(row.penalty / 60)));
 
-    const order = row.columns;
+    // Every row uses the shared header order, so a column always means the same
+    // problem. Only the cell contents differ per team.
+    const order = frame.stats.order;
     for (let position = 0; position < problemCount; position++) {
       const probIdx = order[position];
       const td = cells[STICKY.length + position];
@@ -298,7 +319,11 @@ export function createBoard({ container, timeline }) {
         : content.className;
 
       if (td.className !== cls) td.className = cls;
+      // Both the problem id and the column position are recorded: the header
+      // must carry the same (probIdx -> position) mapping, otherwise a column
+      // would mean different problems on different rows.
       if (td.dataset.prob !== String(probIdx)) td.dataset.prob = String(probIdx);
+      if (td.dataset.column !== String(position)) td.dataset.column = String(position);
       if (td.dataset.revealed !== (revealed ? '1' : '0')) {
         td.dataset.revealed = revealed ? '1' : '0';
       }
@@ -307,19 +332,24 @@ export function createBoard({ container, timeline }) {
       }
       pulseText(td, content.text);
     }
-
-    tr._order = order;
   }
 
   /** Header: live solve/submit counts, order, and colour only when revealed. */
   function renderHeader() {
-    const { stats, visibleSec } = frame;
+    const { stats, boardSec } = frame;
 
+    // Reorder the header to match the shared column order, and record the
+    // resulting position on each cell so header and rows can be compared.
     const orderKey = stats.order.join(',');
     if (orderKey !== lastHeaderOrder) {
       lastHeaderOrder = orderKey;
       const fragment = document.createDocumentFragment();
-      for (const probIdx of stats.order) fragment.append(headers[probIdx].cell);
+      for (let position = 0; position < stats.order.length; position++) {
+        const probIdx = stats.order[position];
+        const entry = headers[probIdx];
+        entry.cell.dataset.column = String(position);
+        fragment.append(entry.cell);
+      }
       headProbs.append(fragment);
     }
 
@@ -378,11 +408,6 @@ export function createBoard({ container, timeline }) {
       }
       keep.add(row.teamIdx);
 
-      // Re-apply the team's own column order only when it actually changed.
-      if (tr._order !== row.columns) {
-        tr.replaceChildren(...tr._cells);
-        tr._order = row.columns;
-      }
       // `transform` (not `top`) so rank swaps can be animated by CSS.
       tr.style.transform = `translateY(${HEAD_HEIGHT + (first + i) * ROW_HEIGHT}px)`;
       renderRow(tr, row);

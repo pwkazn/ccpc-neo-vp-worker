@@ -261,7 +261,31 @@ export function floorToPrecision(seconds, precision) {
 }
 
 /**
- * The four per-team column buckets (rule 3).
+ * The order in which problem cells are laid out across the board.
+ *
+ * A column board has exactly one order for everybody: the header defines it
+ * (see rule 5 — descending by live solve count, ties by problem number) and
+ * every team's row follows it. A cell's *position* therefore means the same
+ * problem on every row, and the only thing that varies per team is what is
+ * drawn inside the cell.
+ *
+ * @param {number[]} headerOrder problem indices, best-first
+ * @returns {number[]} a copy, so callers cannot mutate the shared order
+ */
+export function sharedColumnOrder(headerOrder) {
+  return headerOrder.slice();
+}
+
+/**
+ * The per-team column order described by rule 3.
+ *
+ * This is the *row-internal* ordering the rule text describes (revealed
+ * problems first, then that team's own hidden solves by solve time, then its
+ * other attempts, then untouched problems). It is kept because it is the
+ * documented behaviour of a per-team scoreboard cell layout and is still
+ * exercised by the tests, but the interactive board does not use it: a
+ * column board cannot give every row a different order without the columns
+ * ceasing to mean anything.
  *
  * @param {object} state replay state at `tSec`
  * @param {number} teamIdx
@@ -386,6 +410,8 @@ export function problemStatus(state, tSec, options = {}) {
  * @param {object} [options]
  * @param {boolean} [options.officialOnly] rank official teams only
  * @param {ArrayLike<number>} [options.triesFallback]
+ * @param {object} [options.medals] output of `medalBands()`; when given, each
+ *   official row gets a `medal` field (`'gold' | 'silver' | 'bronze' | null`)
  * @returns {{ rows: object[], officialTeams: number }}
  */
 export function computeBoard(state, tSec, stats, options = {}) {
@@ -427,11 +453,15 @@ export function computeBoard(state, tSec, stats, options = {}) {
     }
   }
 
+  // One column order for the whole board, defined by the header. Every row
+  // follows it, so a column always means the same problem on every row.
+  const columns = sharedColumnOrder(stats.order);
+
   for (const row of rows) {
     if (!row.official) row.rank = 0;
-    row.columns = columnOrder(state, row.teamIdx, tSec, stats.aliasRevealed, {
-      triesFallback: options.triesFallback,
-    });
+    row.columns = columns;
+    // Medal band for this rank, from the ranklist's own ICPC series.
+    row.medal = options.medals ? medalFor(options.medals, row.rank, row.official) : null;
   }
 
   if (options.officialOnly !== false) {
@@ -443,6 +473,96 @@ export function computeBoard(state, tSec, stats, options = {}) {
   }
 
   return { rows, officialTeams };
+}
+
+/**
+ * Default award ratios, used when the ranklist does not state its own. These
+ * are the ICPC regional conventions (10% gold, 20% silver, 30% bronze).
+ */
+export const DEFAULT_MEDAL_RATIOS = Object.freeze([0.1, 0.2, 0.3]);
+
+/**
+ * Resolve the award bands for a contest.
+ *
+ * A ranklist declares its awards through an ICPC series segment list, e.g.
+ * gold/silver/bronze. The per-award counts can be stated explicitly
+ * (`rule.options.count.value`) or left to the ranklist to derive from the
+ * number of *official* teams (a `[0,0,0]` placeholder). Only official teams
+ * count towards the quota, matching the usual contest rules.
+ *
+ * @param {object} timeline wire timeline
+ * @param {number} officialTeams number of ranked (official) teams
+ * @returns {{ medals: Array<{style: string, title: string, count: number}>,
+ *             limits: number[], ratios: number[], source: 'declared'|'default' }|null}
+ */
+export function medalBands(timeline, officialTeams) {
+  const declared = timeline?.awards;
+  if (!declared || officialTeams <= 0) return null;
+
+  const segments = Array.isArray(declared.segments) ? declared.segments : [];
+  if (segments.length === 0) return null;
+
+  // Explicit per-award counts win when any of them is non-zero.
+  const declaredCounts = Array.isArray(declared.counts) ? declared.counts : null;
+  const hasDeclaredCounts = declaredCounts !== null
+    && declaredCounts.some((value) => Number.isFinite(value) && value > 0);
+
+  const ratios = hasDeclaredCounts
+    ? null
+    : (Array.isArray(declared.ratios) && declared.ratios.length === segments.length
+      ? declared.ratios
+      : DEFAULT_MEDAL_RATIOS);
+
+  const medals = [];
+  let running = 0;
+  const limits = [];
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index];
+    let count;
+    if (hasDeclaredCounts) {
+      count = Math.max(0, Math.trunc(declaredCounts[index] ?? 0));
+    } else {
+      const ratio = ratios[index] ?? 0;
+      // Each band boundary is floor(officialTeams * cumulative ratio), so the
+      // bands are contiguous and the 10/20/30% ratios mean "top 10%".
+      const boundary = Math.floor(officialTeams * (ratios.slice(0, index + 1).reduce((a, b) => a + b, 0)));
+      count = Math.max(0, boundary - running);
+    }
+    running += count;
+    limits.push(running);
+    medals.push({
+      style: segment.style ?? null,
+      title: segment.title ?? null,
+      count,
+    });
+  }
+
+  if (running <= 0) return null;
+  return {
+    medals,
+    limits,
+    ratios: hasDeclaredCounts ? [] : ratios,
+    source: hasDeclaredCounts ? 'declared' : 'default',
+  };
+}
+
+/**
+ * Which award band a rank falls into.
+ * @param {object} medals output of `medalBands()`
+ * @param {number} rank 1-based competition rank (0 for unranked)
+ * @param {boolean} official
+ * @returns {string|null} the segment style, e.g. `'gold'`
+ */
+export function medalFor(medals, rank, official) {
+  if (!medals || !official || rank <= 0) return null;
+  for (let index = 0; index < medals.limits.length; index++) {
+    if (rank <= medals.limits[index]) {
+      const segment = medals.medals[index];
+      // Fall back to positional names when the ranklist gave no style.
+      return segment.style ?? ['gold', 'silver', 'bronze'][index] ?? null;
+    }
+  }
+  return null;
 }
 
 /**

@@ -466,6 +466,27 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--bg-ele
 .board__row:hover { z-index: 4; }
 .board__row:hover .cell { filter: brightness(1.12); }
 
+/* Award bands, tinting the rank cell. Only ranked (official) teams get one. */
+.row-cell.col-rank {
+  position: relative;
+  font-weight: 700;
+}
+.medal-gold,
+.medal-silver,
+.medal-bronze {
+  background: var(--medal-bg) !important;
+  color: var(--medal-fg);
+  box-shadow: inset 3px 0 0 var(--medal-edge);
+}
+.medal-gold { --medal-bg: #6b5410; --medal-fg: #ffe9a8; --medal-edge: #e0b32c; }
+.medal-silver { --medal-bg: #4a5158; --medal-fg: #eef2f6; --medal-edge: #c3ccd6; }
+.medal-bronze { --medal-bg: #5b3a22; --medal-fg: #ffd9b8; --medal-edge: #c8813f; }
+@media (prefers-color-scheme: light) {
+  .medal-gold { --medal-bg: #fdf0c4; --medal-fg: #5a4508; --medal-edge: #c99a12; }
+  .medal-silver { --medal-bg: #e9eef4; --medal-fg: #3b444e; --medal-edge: #9aa6b3; }
+  .medal-bronze { --medal-bg: #f7e2d0; --medal-fg: #5c3418; --medal-edge: #b4703a; }
+}
+
 .row-cell.cell {
   display: flex;
   align-items: center;

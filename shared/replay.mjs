@@ -18,9 +18,19 @@ import {
   cloneState,
   computeBoard,
   createState,
+  medalBands,
   problemStatus,
   replayTo,
 } from './rules.mjs';
+
+/** How many teams are ranked (official) in a replay state. */
+function countOfficial(state) {
+  let count = 0;
+  for (let teamIdx = 0; teamIdx < state.teamCount; teamIdx++) {
+    if (state.timeline.teams[teamIdx]?.official !== false) count++;
+  }
+  return count;
+}
 
 /**
  * Build a frame from scratch at a given contest second.
@@ -38,9 +48,11 @@ import {
 export function frameAt(timeline, tSec, options = {}) {
   const { state } = replayTo(timeline, tSec, { revealScope: options.revealScope });
   const stats = problemStatus(state, tSec, { ratio: options.ratio, min: options.min });
-  const { rows, officialTeams } = computeBoard(state, tSec, stats, {
+  const officialTeams = countOfficial(state);
+  const { rows } = computeBoard(state, tSec, stats, {
     triesFallback: options.triesFallback ?? timeline.triesFallback ?? null,
     officialOnly: options.officialOnly,
+    medals: medalBands(timeline, officialTeams),
   });
   return { tSec, state, stats, rows, officialTeams };
 }
@@ -156,9 +168,13 @@ export function createEpochReplay(timeline, options = {}) {
     frameAt(tSec, frameOptions = {}) {
       seekTo(tSec);
       const stats = problemStatus(current, tSec, { ratio, min });
-      const { rows, officialTeams } = computeBoard(current, tSec, stats, {
+      // The award quota depends on how many teams are actually ranked, so it is
+      // derived per frame rather than cached once.
+      const officialTeams = countOfficial(current);
+      const { rows } = computeBoard(current, tSec, stats, {
         triesFallback,
         officialOnly: frameOptions.officialOnly,
+        medals: medalBands(timeline, officialTeams),
       });
       return {
         tSec,

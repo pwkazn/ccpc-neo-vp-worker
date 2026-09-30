@@ -20,9 +20,12 @@ import {
   computeBoard,
   createState,
   floorToPrecision,
+  medalBands,
+  medalFor,
   problemStatus,
   replayTo,
   revealThreshold,
+  sharedColumnOrder,
 } from '../shared/rules.mjs';
 import { frameAt, createEpochReplay, resolveFreeze, formatClock } from '../shared/replay.mjs';
 import { createSession, PHASE, DEFAULT_FREEZE_MINUTES } from '../shared/live.mjs';
@@ -682,6 +685,36 @@ test('the freeze length can be changed mid-VP', () => {
   assert.equal(live.visibleSec, 16000);
 });
 
+test('the freeze length accepts ordinary round numbers', () => {
+  // Regression: a `step="5"` attribute on the number input made 60 awkward to
+  // pick. The model must accept any minute count, including 60 exactly.
+  const timeline = makeTimeline({
+    teams: 10, problems: 1, durationSec: 18000, frozenDurationSec: 3600, events: [],
+  });
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0 });
+
+  for (const minutes of [60, 56, 61, 1, 90, 600]) {
+    session.setFreezeMinutes(minutes, t0 + 16_000_000);
+    assert.equal(session.freezeDurationSec, minutes * 60, `${minutes} minutes is stored exactly`);
+  }
+
+  session.setFreezeMinutes(60, t0 + 16_000_000);
+  assert.equal(session.freezeDurationSec, 3600);
+  assert.equal(session.update(t0 + 16_000_000).visibleSec, 14400, 'freeze starts at 14400');
+});
+
+test('a zero or negative freeze length disables the freeze', () => {
+  const timeline = makeTimeline({
+    teams: 10, problems: 1, durationSec: 18000, frozenDurationSec: 3600, events: [],
+  });
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0 });
+  session.setFreezeMinutes(0, t0 + 16_000_000);
+  assert.equal(session.freezeDurationSec, 0);
+  assert.equal(session.update(t0 + 16_000_000).frozen, false);
+});
+
 // ------------------------------------------------- live submit counts
 
 test('problemStatus reports distinct submitting teams as well as solvers', () => {
@@ -767,6 +800,36 @@ test('session goes through countdown, running, frozen and revealed', () => {
   assert.equal(end.phase, PHASE.ENDED);
   assert.equal(end.revealed, true, 'the freeze lifts automatically at the end');
   assert.equal(end.visibleSec, 18000);
+});
+
+test('a frozen board keeps its clock and progress running', () => {
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 2,
+    durationSec: 18000,
+    frozenDurationSec: 3600, // freezes at 14400
+    events: [[600, 0, 0, RESULT.AC], [15000, 0, 1, RESULT.AC]],
+  });
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0 });
+
+  const early = session.update(t0 + 15_000_000);
+  assert.equal(early.frozen, true);
+  assert.equal(early.boardSec, 14400, 'board contents held at the freeze second');
+  assert.equal(early.contestSec, 15000, 'the contest clock keeps running');
+
+  const later = session.update(t0 + 17_000_000);
+  assert.equal(later.frozen, true);
+  assert.equal(later.boardSec, 14400, 'still frozen');
+  assert.equal(later.contestSec, 17000, 'and the clock advanced');
+
+  // The board contents must not change while frozen...
+  assert.equal(early.rows[0].solved, later.rows[0].solved);
+  // ...but once unfrozen they catch up.
+  const ended = session.update(t0 + 18_100_000);
+  assert.equal(ended.frozen, false);
+  assert.equal(ended.boardSec, 18000);
+  assert.equal(ended.rows[0].solved, 2);
 });
 
 test('a frozen session stops reflecting new events, and unfreezing reveals them', () => {
@@ -935,4 +998,154 @@ test('BUCKET ordering matches the documented priority', () => {
   assert.ok(BUCKET.REVEALED < BUCKET.SOLVED_HIDDEN);
   assert.ok(BUCKET.SOLVED_HIDDEN < BUCKET.ATTEMPTED_HIDDEN);
   assert.ok(BUCKET.ATTEMPTED_HIDDEN < BUCKET.UNTOUCHED);
+});
+
+// ------------------------------------------- shared column order (rule 1)
+
+test('every row uses the header order, so a column means one problem', () => {
+  // 30 teams => threshold min(floor(30*0.2), 50) = 6.
+  const timeline = makeTimeline({
+    teams: 30,
+    problems: 3,
+    events: [
+      // P1 gets 6 solvers (revealed, leads), P0 gets 6 (revealed), P2 gets none.
+      [10, 0, 1, RESULT.AC], [11, 1, 1, RESULT.AC], [12, 2, 1, RESULT.AC],
+      [13, 3, 1, RESULT.AC], [14, 4, 1, RESULT.AC], [15, 5, 1, RESULT.AC],
+      [20, 0, 0, RESULT.AC], [21, 1, 0, RESULT.AC], [22, 2, 0, RESULT.AC],
+      [23, 3, 0, RESULT.AC], [24, 4, 0, RESULT.AC], [25, 5, 0, RESULT.AC],
+      // Two teams have wildly different personal histories.
+      [30, 10, 2, RESULT.WA],
+      [31, 10, 1, RESULT.AC],
+    ],
+  });
+  const { state, stats } = replay(timeline, 9999);
+  const board = computeBoard(state, 9999, stats);
+
+  assert.deepEqual(stats.order, [0, 1, 2].sort((a, b) => stats.solved[b] - stats.solved[a] || a - b));
+
+  const reference = board.rows[0].columns;
+  const sameOrder = board.rows.every((row) => row.columns === reference
+    || JSON.stringify(row.columns) === JSON.stringify(reference));
+  assert.ok(sameOrder, 'all rows share one column order');
+  assert.deepEqual(reference, stats.order, 'and that order is the header order');
+
+  // The two teams with different histories still render into the same columns.
+  const byTeam = new Map(board.rows.map((row) => [row.teamIdx, row]));
+  assert.deepEqual(byTeam.get(10).columns, reference);
+  assert.deepEqual(byTeam.get(0).columns, reference);
+});
+
+test('sharedColumnOrder returns a copy so callers cannot corrupt the header', () => {
+  const order = [2, 0, 1];
+  const copy = sharedColumnOrder(order);
+  copy.reverse();
+  assert.deepEqual(order, [2, 0, 1], 'the source order is untouched');
+});
+
+// ------------------------------------------------------- medals (rule 8)
+
+test('medalBands uses the ICPC 10/20/30 ratios when counts are placeholders', () => {
+  const timeline = {
+    awards: {
+      segments: [
+        { style: 'gold', title: 'Gold Award' },
+        { style: 'silver', title: 'Silver Award' },
+        { style: 'bronze', title: 'Bronze Award' },
+      ],
+      counts: [0, 0, 0],
+      ratios: null,
+    },
+  };
+  const bands = medalBands(timeline, 100);
+  assert.equal(bands.source, 'default');
+  // Contiguous bands covering the top 10% / 20% / 30%.
+  assert.deepEqual(bands.limits, [10, 30, 60]);
+  assert.deepEqual(bands.medals.map((m) => m.count), [10, 20, 30]);
+});
+
+test('medalBands honours explicitly declared counts', () => {
+  const timeline = {
+    awards: {
+      segments: [{ style: 'gold' }, { style: 'silver' }, { style: 'bronze' }],
+      counts: [5, 10, 20],
+      ratios: null,
+    },
+  };
+  const bands = medalBands(timeline, 999);
+  assert.equal(bands.source, 'declared');
+  assert.deepEqual(bands.limits, [5, 15, 35]);
+  assert.deepEqual(bands.medals.map((m) => m.count), [5, 10, 20]);
+});
+
+test('medalBands scales with the live ranked-team count', () => {
+  const timeline = {
+    awards: { segments: [{ style: 'gold' }, { style: 'silver' }, { style: 'bronze' }], counts: [0, 0, 0] },
+  };
+  assert.deepEqual(medalBands(timeline, 10).limits, [1, 3, 6]);
+  assert.deepEqual(medalBands(timeline, 1000).limits, [100, 300, 600]);
+  assert.equal(medalBands(timeline, 0), null, 'no ranked teams, no awards');
+});
+
+test('medalFor maps a rank to its band and skips unranked rows', () => {
+  const bands = medalBands({
+    awards: {
+      segments: [{ style: 'gold' }, { style: 'silver' }, { style: 'bronze' }],
+      counts: [2, 3, 5],
+    },
+  }, 100);
+
+  assert.equal(medalFor(bands, 1, true), 'gold');
+  assert.equal(medalFor(bands, 2, true), 'gold');
+  assert.equal(medalFor(bands, 3, true), 'silver');
+  assert.equal(medalFor(bands, 5, true), 'silver');
+  assert.equal(medalFor(bands, 6, true), 'bronze');
+  assert.equal(medalFor(bands, 10, true), 'bronze');
+  assert.equal(medalFor(bands, 11, true), null, 'past the last band');
+  assert.equal(medalFor(bands, 1, false), null, 'unofficial teams get nothing');
+  assert.equal(medalFor(bands, 0, true), null, 'unranked');
+  assert.equal(medalFor(null, 1, true), null);
+});
+
+test('computeBoard attaches a medal to official rows only', () => {
+  const timeline = makeTimeline({
+    teams: 20,
+    problems: 1,
+    // Team 1 is unofficial and solves first.
+    official: [true, false, true, true, true, true, true, true, true, true,
+      true, true, true, true, true, true, true, true, true, true],
+    events: [
+      [10, 1, 0, RESULT.AC],
+      [20, 0, 0, RESULT.AC],
+      [30, 2, 0, RESULT.AC],
+    ],
+  });
+  timeline.awards = {
+    segments: [{ style: 'gold' }, { style: 'silver' }, { style: 'bronze' }],
+    counts: [1, 1, 1],
+  };
+
+  const { state, stats } = replay(timeline, 9999);
+  const officialTeams = 19;
+  const board = computeBoard(state, 9999, stats, {
+    medals: medalBands(timeline, officialTeams),
+  });
+
+  // 19 official teams with default ratios => gold ends at floor(19 * 10%) = 1.
+  const bands = medalBands(timeline, officialTeams);
+  assert.equal(bands.limits[0], 1);
+
+  // Teams 0 and 2 are both rank 1 (the unofficial team in between is not
+  // ranked and scores identically), so both are in the gold band.
+  const gold = board.rows.filter((row) => row.medal === 'gold');
+  assert.equal(gold.length, 2, 'both tied rank-1 official teams are gold');
+  assert.ok(gold.every((row) => row.official), 'gold only ever goes to official teams');
+  assert.ok(gold.every((row) => row.rank === 1));
+  assert.ok(board.rows.filter((row) => !row.official).every((row) => row.medal === null));
+});
+
+test('computeBoard leaves medals null when the ranklist declares none', () => {
+  const timeline = makeTimeline({ teams: 5, problems: 1, events: [[10, 0, 0, RESULT.AC]] });
+  const { state, stats } = replay(timeline, 9999);
+  const board = computeBoard(state, 9999, stats);
+  assert.ok(board.rows.every((row) => row.medal === null));
 });

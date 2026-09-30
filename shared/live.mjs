@@ -87,7 +87,7 @@ export function createSession(timeline, options = {}) {
 
     epoch: createEpochReplay(timeline, { revealScope: options.revealScope }),
     revision: 0,
-    lastVisibleSec: -1,
+    lastBoardSec: -1,
     frame: null,
   };
 
@@ -161,32 +161,37 @@ export function createSession(timeline, options = {}) {
 
   /** Compute a fresh board frame and memoise it. */
   session.computeFrame = function computeFrame() {
+    /**
+     * Two different times:
+     *   - `contestSec` is the real contest clock. It keeps running during a
+     *     freeze, so the timer and progress bar stay honest;
+     *   - `boardSec` is the second the *board contents* describe. During a
+     *     freeze it is held at the freeze second, so no post-freeze result can
+     *     leak out.
+     */
     const contestSec = currentSec();
     const freeze = session.freezeState();
-    const visibleSec = Math.max(0, Math.floor(freeze.visibleSec));
-    const revealed = session.isRevealed();
+    const boardSec = Math.max(0, Math.floor(freeze.visibleSec));
 
-    const { rows, stats } = session.epoch.frameAt(visibleSec, {
+    const { rows, stats } = session.epoch.frameAt(boardSec, {
       officialOnly: session.officialOnly,
     });
 
-    session.lastVisibleSec = visibleSec;
+    session.lastBoardSec = boardSec;
     session.frame = {
-      /** wall-clock contest time (keeps advancing while frozen) */
       contestSec,
-      /** contest time actually displayed (held at the freeze second) */
-      visibleSec,
+      boardSec,
+      /** @deprecated alias: older call sites used `visibleSec` for board time */
+      visibleSec: boardSec,
       frozen: freeze.frozen,
       frozenAtSec: freeze.frozenAtSec,
       revealPending: freeze.revealPending,
-      revealed,
+      revealed: session.isRevealed(),
       phase: session.phase(),
       rows,
       state: session.epoch.state,
       /** live per-problem solve counts, reveal flags and header order */
       stats,
-      /** @deprecated alias kept for the board's older call sites */
-      reveal: stats,
       triesFallback: session.timeline.triesFallback ?? null,
       detached: session.detached,
       speed: session.speed,
@@ -197,16 +202,18 @@ export function createSession(timeline, options = {}) {
 
   /**
    * Advance the session to the current wall clock.
-   * Recomputes only when the visible contest second or the revision changed.
-   * @returns {object} the current frame
+   *
+   * Recomputes the board only when the *board* second changed, so the clock can
+   * tick smoothly while the frozen board stands still.
    */
   session.update = function update(nowSec = Date.now()) {
     session.now = nowSec;
     const contestSec = currentSec();
-    const visibleSec = Math.max(0, Math.floor(session.freezeState().visibleSec));
+    const freeze = session.freezeState();
+    const boardSec = Math.max(0, Math.floor(freeze.visibleSec));
 
     const stale = session.frame === null
-      || visibleSec !== session.lastVisibleSec
+      || boardSec !== session.lastBoardSec
       || session.frame.revision !== session.revision;
 
     if (stale) return session.computeFrame();
@@ -270,7 +277,7 @@ export function createSession(timeline, options = {}) {
     session.detached = false;
     session.revealed = false;
     session.now = nowSec;
-    session.lastVisibleSec = -1;
+    session.lastBoardSec = -1;
     session.revision++;
     return session.update(nowSec);
   };
@@ -312,7 +319,7 @@ export function createSession(timeline, options = {}) {
   session.setRevealScope = function setRevealScope(scope, nowSec = session.now) {
     session.revealScope = scope === 'official' ? 'official' : 'all';
     session.epoch = createEpochReplay(session.timeline, { revealScope: session.revealScope });
-    session.lastVisibleSec = -1;
+    session.lastBoardSec = -1;
     session.revision++;
     return session.update(nowSec);
   };

@@ -83,14 +83,26 @@ revealed(p, T) ⇔ T ≥ revealSec[p]
 
 ## 2. 榜单不按统一题目顺序展示（说明文档第 2 条）
 
-这是第 3 条的结论：**行内列顺序因队而异**，因此列位置不代表题目身份。
+榜单**不按题号顺序**展示题目 —— 顺序由规则 5 决定（按实时过题数降序），所以列位置不能用来推断题号。
 
-**实现**：`web/board.mjs` 中每行 `<tr>` 按该队自己的顺序重排单元格，并在 `td.dataset.prob` 上保存真实题目下标；
-顶部题号栏（规则 5）**按实时过题数排序**，也不固定为题目下标顺序，因此同样不能由列位置推断题号。
+**本工具的实际取舍**：这是一个**列式**榜单，而列式榜单只能有**一套**顺序 —— 否则同一列在不同行意味着不同题目，就不是列式榜单了。
+因此：
+
+- **顶部题号栏定义顺序**，**所有队伍的行都follow同一顺序**，`td.dataset.prob` 记录真实题目下标；
+- 行与行之间只有**单元格内容**不同（绿/红/蓝、用时、次数），列位置永远对应同一道题；
+- 规则 3 描述的那套**逐队顺序**（先已显示题号的、再该队自己的隐藏过题…）保留在 `columnOrder()` 里并有测试覆盖，但**交互榜单不使用它** —— 它无法与列式布局共存。
+
+这正是用户反馈「标题的题目顺序和下方队伍的题目顺序对不上」要修的点：改为一套共享顺序后，列与题目一一对应。
+
+**实现**：`shared/rules.mjs` → `problemStatus().order`（唯一来源），`sharedColumnOrder()`（下发副本），`web/board.mjs` → `renderHeader()` 排列表头、`renderRow()` 用 `frame.stats.order` 填每一行。
+**测试**：`test/rules.test.mjs` → "every row uses the header order, so a column means one problem"、"sharedColumnOrder returns a copy so callers cannot corrupt the header"。
 
 ---
 
 ## 3. 每队解题情况的题目顺序（说明文档第 3 条）
+
+> ⚠️ **本工具不把这套顺序用于榜单列布局。** 榜单是列式的，只能有一套顺序（见第 2 条），因此实际渲染用的是顶部题号栏的顺序。
+> 下面这套逐队顺序**保留在 `columnOrder()` 中并有完整测试**，因为它是规则原文的行为、也是排查问题时理解「某队几题、难度分布」的参考实现；若将来要做成"每队一段自定义顺序"的非列式视图，可以直接复用。
 
 > ⚫ 先展示显示题号的题目，顺序为题号由小到大；
 > ⚫ 再展示剩余题目中队伍已 AC 的，顺序为 AC 时刻由早到晚；
@@ -165,7 +177,7 @@ revealed(p, T) ⇔ T ≥ revealSec[p]
 
 ---
 
-## 5. 计分（ICPC 规则 + 时间精度）
+## 6. 计分（ICPC 规则 + 时间精度）
 
 > 榜单仍会显示每支队伍的 AC 题数、总罚时。
 
@@ -189,7 +201,7 @@ totalPenalty[g] = floor_to_precision(penalty[g])
 
 ---
 
-## 6. 排名
+## 7. 排名
 
 **形式化**
 
@@ -207,7 +219,7 @@ totalPenalty[g] = floor_to_precision(penalty[g])
 
 ---
 
-## 7. 封榜与解封（说明文档第 5 条）
+## 8. 封榜与解封（说明文档第 5 条）
 
 > 比赛最后 1 小时封榜，封榜后榜单显示与原 XCPC 模式相同。
 
@@ -283,7 +295,52 @@ t=18001   ended    visible=18000  revealed=true    自动解封，题号与计�
 
 ---
 
-## 8. 气球（本版本未实现）
+## 9. 奖项区（金 / 银 / 铜）
+
+名次单元格按奖项区染色，**只给正式（official）队伍染**，非正式队伍名次显示 `—` 且不染。
+
+**名额计算**
+
+```
+officialTeams = 当前榜单里的正式队伍数
+若榜单文件的 ICPC series 显式给出 count（非全 0）：
+    每个奖项的 count 直接使用
+否则（count 为 [0,0,0] 占位，或没有 count）：
+    按 ICPC 区域赛惯例比例 ratio = [0.10, 0.20, 0.30]
+    第 i 个奖项的边界 = ⌊officialTeams × (ratio[0..i] 之和)⌋
+    count[i] = 边界[i] − 边界[i−1]
+```
+
+名额是**按当前队伍数实时算的**，不是写死的：队伍没变时它也不变，但换一场比赛、或切换"是否仅官方队伍参与排名"时会重算。
+
+**实测**（2026 CCPC 网络预选赛，正式队伍 2166）：
+
+| 奖项 | 名额 | 名次区间 |
+| --- | --- | --- |
+| 金 | 216 | 1 – 216 |
+| 银 | 433 | 217 – 649 |
+| 铜 | 650 | 650 – 1299 |
+
+（铜区 650 而非 649，是因为边界用 `⌊2166×0.6⌋ = 1299` 减上一段得到，符合"区间连续"的算法。）
+
+**并列**：名次相同（`solved` 与 `penalty` 都相同）的队伍共享同一名次，因此也**共享同一奖项区** —— 上表区间按名次而非按行数切分。
+
+**实现**
+
+| 步骤 | 位置 |
+| --- | --- |
+| 从 SRK 抽取奖项声明 | `server/build-timeline.mjs` → `extractAwards()`，写入 `timeline.awards` |
+| 名额与边界 | `shared/rules.mjs` → `medalBands()` |
+| 名次 → 奖项 | `shared/rules.mjs` → `medalFor()` |
+| 每行附加 `medal` 字段 | `shared/rules.mjs` → `computeBoard()` |
+| 染色与 tooltip | `web/board.mjs` → `renderRow()`；`web/ui.css` → `.medal-gold/.medal-silver/.medal-bronze` |
+
+**测试**：`test/rules.test.mjs` → "medalBands uses the ICPC 10/20/30 ratios when counts are placeholders"、"medalBands honours explicitly declared counts"、"medalBands scales with the live ranked-team count"、"medalFor maps a rank to its band and skips unranked rows"、"computeBoard attaches a medal to official rows only"、"computeBoard leaves medals null when the ranklist declares none"。
+
+> 说明：`problems`/`series` 里若既没有显式 `count` 也没有 `ratio`，就用上面的 10/20/30 惯例；这是 ICPC 区域赛的通行比例，但**各赛区可能不同**。要改的话只需在 `medalBands()` 里改 `DEFAULT_MEDAL_RATIOS`，或让榜单文件带上显式 `count`。
+
+---
+
 
 说明文档中的两种一血方案与每队专属颜色映射，已在数据结构层面预留：
 
@@ -294,18 +351,18 @@ t=18001   ended    visible=18000  revealed=true    自动解封，题号与计�
 
 ---
 
-## 9. 规则变更时的修改清单
+## 10. 规则变更时的修改清单
 
 | 若官方调整… | 改这里 |
 | --- | --- |
-| 20% 或 50 队门限 | `DEFAULT_REVEAL_RATIO` / `DEFAULT_REVEAL_MIN`（`server/build-timeline.mjs`） |
-| 计数范围（全部 vs 仅官方） | `buildTimeline()` 中的 `teamCounted`；界面默认值在 `web/index.html` |
-| 题目排序优先级 | `columnOrder()` 的桶定义与 key |
+| 20% 或 50 队门限 | `DEFAULT_REVEAL_RATIO` / `DEFAULT_REVEAL_MIN`（`server/build-timeline.mjs`）与 `revealThreshold()`（`shared/rules.mjs`） |
+| 计数范围（全部 vs 仅官方） | `createState()` 的 `revealScope`；界面默认值在 `web/index.html` |
+| 顶部题号栏排序 | `problemStatus()` 里的 `order.sort(...)` |
 | 免罚结果集合 | 榜单文件的 `sorter.config.noPenaltyResults`（自动生效）；默认值 `SRK_DEFAULT_NO_PENALTY_RESULTS`（`shared/srk.mjs`） |
 | 罚时分钟数 | `sorter.config.penalty`（自动生效） |
 | 时间精度 | `sorter.config.timePrecision`（自动生效）+ `floorToPrecision()` |
-| 封榜时长 | `contest.frozenDuration`（自动生效） |
+| 封榜时长/开关的默认 | `createSession()`（`shared/live.mjs`）；界面在 `web/index.html` |
 | 并列名次算法 | `computeBoard()` 的名次分配循环 |
-| 一血气球形态 | 见第 8 节（待实现） |
+| 金/银/铜比例 | `DEFAULT_MEDAL_RATIOS`（`shared/rules.mjs`），或让榜单文件带显式 `count` |
 
 改完请跑：`npm test`，以及 `VP_E2E=1 npm run test:e2e` 确认真实数据仍然逐队一致。

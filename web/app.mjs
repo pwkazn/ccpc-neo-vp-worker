@@ -196,6 +196,28 @@ async function loadContests({ refresh = false } = {}) {
   }
 }
 
+/**
+ * Prefill the freeze controls from a contest's declared freeze window, so the
+ * number the user sees is the one that will actually be used.
+ * @param {{frozenDurationSec?: number|null, durationSec?: number|null}} contest
+ */
+function syncFreezeDefaults(contest) {
+  const declared = contest.frozenDurationSec;
+  if (Number.isFinite(declared) && declared > 0) {
+    el.freezeMinutes.value = String(Math.round(declared / 60));
+    el.freezeEnabled.checked = true;
+    el.freezeHint.textContent = `该场榜单声明冻结 ${Math.round(declared / 60)} 分钟，已填入。`;
+    return;
+  }
+  if (declared === 0) {
+    el.freezeEnabled.checked = false;
+    el.freezeHint.textContent = '该场榜单声明不封榜；勾选后可按下方时长强制封榜。';
+    return;
+  }
+  el.freezeEnabled.checked = true;
+  el.freezeHint.textContent = '该场未声明冻结时长，默认按惯例封最后一小时。';
+}
+
 function renderContestList() {
   const needle = el.contestSearch.value.trim().toLowerCase();
   const filtered = app.contests
@@ -240,6 +262,7 @@ function renderContestList() {
       li.addEventListener('click', () => {
         app.selectedUk = contest.uk;
         el.btnStart.disabled = false;
+        syncFreezeDefaults(contest);
         renderContestList();
         el.contestList.scrollIntoView({ block: 'nearest' });
       });
@@ -299,15 +322,19 @@ function applyUrlParams() {
   if (SPEEDS.includes(speed)) app.pendingSpeed = speed;
 
   const freeze = params.get('freeze');
+  let freezeInUrl = false;
   if (freeze === '0' || freeze === 'off') {
     el.freezeEnabled.checked = false;
+    freezeInUrl = true;
   } else if (freeze === '1' || freeze === 'on') {
     el.freezeEnabled.checked = true;
+    freezeInUrl = true;
   }
 
   const freezeMinutes = Number(params.get('freeze_minutes'));
   if (Number.isFinite(freezeMinutes) && freezeMinutes > 0) {
     el.freezeMinutes.value = String(freezeMinutes);
+    freezeInUrl = true;
   }
 
   const scope = params.get('scope');
@@ -321,7 +348,7 @@ function applyUrlParams() {
     el.officialOnly.checked = official === '1';
   }
 
-  return { applyImmediately, ready };
+  return { applyImmediately, ready, freezeInUrl };
 }
 
 /** Format an epoch ms as the `YYYY-MM-DDTHH:MM` string a datetime-local input wants. */
@@ -385,7 +412,7 @@ async function startVp() {
       now: Date.now(),
       speed: app.pendingSpeed ?? 1,
       freezeEnabled: el.freezeEnabled.checked,
-      freezeMinutes: Number(el.freezeMinutes.value) || undefined,
+      freezeMinutes: readFreezeMinutes(el.freezeMinutes),
       revealScope: el.revealScope.value,
       officialOnly: el.officialOnly.checked,
     });
@@ -518,13 +545,19 @@ function renderCountdown(frame) {
  * thing that needs sub-second updates.
  */
 function renderBoard(frame) {
-  // While frozen the board is pinned to the freeze second even though the real
-  // contest clock keeps running, so show the frozen time as "current".
-  const displaySec = frame.frozen ? frame.visibleSec : frame.contestSec;
-  el.clockContest.textContent = formatClock(Math.max(0, Math.floor(displaySec)));
+  /**
+   * The clock and the progress bar track the *real* contest time and keep
+   * running while the board is frozen — only the board contents are held back
+   * at the freeze second. Freezing results should not stop the stopwatch.
+   */
+  el.clockContest.textContent = formatClock(Math.max(0, Math.floor(frame.contestSec)));
   el.clockWall.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  el.seek.value = String(frame.visibleSec);
-  el.seek.title = `比赛时间 ${formatClock(frame.visibleSec)}`;
+
+  // When detached the user is scrubbing, so follow their position instead.
+  el.seek.value = String(Math.max(0, Math.floor(frame.contestSec)));
+  el.seek.title = frame.frozen
+    ? `比赛进度 ${formatClock(frame.contestSec)}（榜单冻结于 ${formatClock(frame.boardSec)}）`
+    : `比赛时间 ${formatClock(frame.contestSec)}`;
 
   el.badgeFreeze.hidden = !frame.frozen;
   el.badgeFreeze.classList.toggle('badge--pulse', frame.frozen);
@@ -549,19 +582,21 @@ function renderBoard(frame) {
   const status = [];
   if (frame.detached) status.push('已脱离实时（拖动或暂停中）');
   if (frame.revealed) status.push('已解封：显示完整榜单');
-  else if (frame.frozen) status.push(`已封榜，冻结于 ${formatClock(frame.frozenAtSec)}（题号全部可见，结果未知）`);
-  if (frame.frozen) status.push(`封榜前门限 ${stats.threshold} 队`);
-  else status.push(`门限 ${stats.threshold} 队`);
+  else if (frame.frozen) {
+    status.push(`已封榜：榜单停在 ${formatClock(frame.frozenAtSec)}，比赛已进行 ${formatClock(frame.contestSec)}`);
+    status.push('题号全部可见，未出结果的提交显示为蓝色 ?');
+  }
+  status.push(`门限 ${stats.threshold} 队`);
   el.playerStatus.textContent = status.join(' · ');
 
   el.boardSummary.textContent = frame.frozen
-    ? `共 ${frame.rows.length} 队 · 已封榜 · 榜单截至 ${formatClock(frame.visibleSec)}`
+    ? `共 ${frame.rows.length} 队 · 已封榜 · 榜单冻结于 ${formatClock(frame.boardSec)}`
     : `共 ${frame.rows.length} 队 · 题目 ${revealedCount}/${stats.solved.length} 已显示`
-      + ` · 榜单截至 ${formatClock(frame.visibleSec)}`;
+      + ` · 榜单截至 ${formatClock(frame.boardSec)}`;
 
-  // Repaint the board only when the displayed contest second actually changed.
-  if (app.board && frame.visibleSec !== app.lastBoardSec) {
-    app.lastBoardSec = frame.visibleSec;
+  // Repaint the board only when the board second actually changed.
+  if (app.board && frame.boardSec !== app.lastBoardSec) {
+    app.lastBoardSec = frame.boardSec;
     app.board.render(frame);
   }
 }
@@ -659,12 +694,33 @@ el.settingsFreezeEnabled.addEventListener('change', () => {
   updateUi();
 });
 
-el.settingsFreezeMinutes.addEventListener('change', () => {
-  const minutes = Number(el.settingsFreezeMinutes.value) || 60;
+/** Freeze length bounds, in minutes. */
+const FREEZE_MIN_MINUTES = 1;
+const FREEZE_MAX_MINUTES = 600;
+
+/**
+ * Read a freeze length from a number input, clamped to the sane range.
+ * Applying it on `input` (not just `change`) means the value the user sees is
+ * always the value in effect, so 60 stays 60 instead of being re-snapped.
+ */
+function readFreezeMinutes(input, fallback = 60) {
+  const raw = Number(input.value);
+  if (!Number.isFinite(raw)) return fallback;
+  const clamped = Math.min(FREEZE_MAX_MINUTES, Math.max(FREEZE_MIN_MINUTES, Math.round(raw)));
+  return clamped;
+}
+
+el.settingsFreezeMinutes.addEventListener('input', () => {
+  const minutes = readFreezeMinutes(el.settingsFreezeMinutes);
   app.session?.setFreezeMinutes(minutes, Date.now());
   el.freezeMinutes.value = String(minutes);
   syncUrl();
   updateUi();
+});
+
+el.settingsFreezeMinutes.addEventListener('blur', () => {
+  // Normalise the visible text so a clamped value is what is displayed.
+  el.settingsFreezeMinutes.value = String(readFreezeMinutes(el.settingsFreezeMinutes));
 });
 
 el.freezeEnabled.addEventListener('change', () => {
@@ -712,5 +768,8 @@ void (async () => {
   // A `uk` (and possibly a past start time) was supplied: jump straight in.
   renderContestList();
   el.btnStart.disabled = false;
+  // Only fill the freeze defaults if the URL did not already state them.
+  const selected = app.contests.find((contest) => contest.uk === app.selectedUk);
+  if (selected && !urlState.freezeInUrl) syncFreezeDefaults(selected);
   if (urlState.applyImmediately) await startVp();
 })();

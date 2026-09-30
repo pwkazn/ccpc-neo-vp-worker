@@ -47,31 +47,43 @@ export const BUCKET = Object.freeze({
 });
 
 /**
- * Counts, per problem, how many distinct counted teams have solved it.
+ * Counts, per problem, how many distinct counted teams have solved it and how
+ * many have submitted to it.
  *
- * The reveal rule needs this counter *as of the currently displayed second*,
- * not the published final tally, so it is maintained incrementally during
- * replay (see `applyEvent`) and restored from snapshots when seeking.
+ * Both counters are needed live: the reveal rule uses the solve count, and the
+ * board header shows "accepted / submitted" as of the displayed second.
+ *
+ * The counters are maintained incrementally during replay (see `applyEvent`)
+ * and restored from snapshots when seeking, so they always describe the
+ * displayed moment rather than the published final figures.
  */
 export class CountedSolves {
   /**
    * @param {number} problemCount
-   * @param {boolean[]} [counted] which teams participate in the count
+   * @param {boolean[]} [counted] which teams participate in counting
    */
   constructor(problemCount, counted = null) {
     this.counted = counted ?? null;
     this.perProblem = new Int32Array(problemCount);
+    this.subPerProblem = new Int32Array(problemCount);
   }
 
-  /** Whether a team contributes to the reveal count. */
+  /** Whether a team contributes to the counters. */
   includes(teamIdx) {
     return this.counted === null || this.counted[teamIdx] === true;
   }
 
-  /** Record a first solve. Returns true when it actually changed the counter. */
+  /** Record a first solve. Returns true when it changed the counter. */
   add(teamIdx, probIdx) {
     if (!this.includes(teamIdx)) return false;
     this.perProblem[probIdx] += 1;
+    return true;
+  }
+
+  /** Record a team's first submission to a problem. */
+  addSubmission(teamIdx, probIdx) {
+    if (!this.includes(teamIdx)) return false;
+    this.subPerProblem[probIdx] += 1;
     return true;
   }
 
@@ -80,9 +92,15 @@ export class CountedSolves {
     return this.perProblem[probIdx];
   }
 
+  /** Number of counted submitting teams for one problem. */
+  submittedCount(probIdx) {
+    return this.subPerProblem[probIdx];
+  }
+
   clone() {
     const copy = new CountedSolves(this.perProblem.length, this.counted);
     copy.perProblem.set(this.perProblem);
+    copy.subPerProblem.set(this.subPerProblem);
     return copy;
   }
 }
@@ -144,8 +162,11 @@ export function applyEvent(state, event) {
   // submission" used for column ordering.
   if (state.acAt[key] !== -1) return false;
 
+  const firstSubmission = state.subs[key] === 0;
   state.subs[key] += 1;
   state.lastSub[key] = tSec;
+  // Count distinct submitting teams per problem for the header's totals.
+  if (firstSubmission) state.counted.addSubmission(teamIdx, probIdx);
 
   if (isAccepted(code)) {
     state.acAt[key] = tSec;
@@ -301,8 +322,9 @@ export function columnOrder(state, teamIdx, tSec, aliasRevealed, options = {}) {
  * Per-problem facts the board needs at the displayed second.
  *
  * `solved` is the live count of distinct counted teams that have solved the
- * problem by `tSec`; `revealed` is whether that count has reached the
- * threshold, and `order` is the row-header order.
+ * problem by `tSec`, `submitted` the live count that has submitted to it, and
+ * `revealed` whether the solve count has reached the threshold. `order` is the
+ * row-header order.
  *
  * @param {object} state replay state (already replayed to `tSec`)
  * @param {number} tSec
@@ -313,6 +335,7 @@ export function columnOrder(state, teamIdx, tSec, aliasRevealed, options = {}) {
  *   threshold: number,
  *   teamsRanked: number,
  *   solved: number[],
+ *   submitted: number[],
  *   aliasRevealed: number[],
  *   revealed: boolean[],
  *   order: number[],
@@ -335,12 +358,14 @@ export function problemStatus(state, tSec, options = {}) {
 
   const threshold = revealThreshold(teamsRanked, ratio, min);
   const solved = new Array(problemCount);
+  const submitted = new Array(problemCount);
   const revealed = new Array(problemCount);
   const revealedAt = new Array(problemCount);
 
   for (let probIdx = 0; probIdx < problemCount; probIdx++) {
     const count = state.counted.count(probIdx);
     solved[probIdx] = count;
+    submitted[probIdx] = state.counted.submittedCount(probIdx);
     revealed[probIdx] = count >= threshold;
     revealedAt[probIdx] = revealed[probIdx] ? tSec : Infinity;
   }
@@ -349,7 +374,7 @@ export function problemStatus(state, tSec, options = {}) {
   const order = Array.from({ length: problemCount }, (_, i) => i);
   order.sort((a, b) => solved[b] - solved[a] || a - b);
 
-  return { threshold, teamsRanked, solved, aliasRevealed: revealedAt, revealed, order };
+  return { threshold, teamsRanked, solved, submitted, aliasRevealed: revealedAt, revealed, order };
 }
 
 /**

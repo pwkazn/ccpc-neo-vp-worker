@@ -187,28 +187,29 @@ export function createEpochReplay(timeline, options = {}) {
  * @param {object} params
  * @param {number} params.contestSec requested contest time (may exceed duration)
  * @param {number} params.durationSec
- * @param {number} params.frozenDurationSec
- * @param {'auto'|'never'} params.freezeMode `never` keeps the board live all the
- *   way to the end; `auto` freezes for the last `frozenDurationSec`.
+ * @param {number} params.freezeDurationSec how long the freeze lasts; a freeze
+ *   can be requested even for contests whose ranklist declares none
+ * @param {boolean} [params.freezeEnabled] false disables the freeze entirely
  * @param {boolean} [params.revealed] force-unfreeze (end of the VP, or manual)
  * @returns {{ visibleSec: number, frozen: boolean, frozenAtSec: number|null, revealPending: boolean }}
  */
 export function resolveFreeze({
   contestSec,
   durationSec,
-  frozenDurationSec,
-  freezeMode = 'auto',
+  freezeDurationSec,
+  freezeEnabled = true,
   revealed = false,
 }) {
   const clip = (value) => Math.max(0, Math.min(value, durationSec));
-  const usesFreeze = freezeMode !== 'never' && frozenDurationSec > 0;
+  const window = Math.max(0, Math.min(freezeDurationSec ?? 0, durationSec));
+  const usesFreeze = freezeEnabled !== false && window > 0;
 
-  // No freeze configured: the board is always live.
+  // No freeze requested: the board is always live.
   if (!usesFreeze) {
     return { visibleSec: clip(contestSec), frozen: false, frozenAtSec: null, revealPending: false };
   }
 
-  const frozenAtSec = clip(durationSec - frozenDurationSec);
+  const frozenAtSec = clip(durationSec - window);
 
   // Before the freeze starts the board is live.
   if (contestSec <= frozenAtSec) {

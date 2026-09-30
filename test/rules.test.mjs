@@ -25,7 +25,7 @@ import {
   revealThreshold,
 } from '../shared/rules.mjs';
 import { frameAt, createEpochReplay, resolveFreeze, formatClock } from '../shared/replay.mjs';
-import { createSession, PHASE } from '../shared/live.mjs';
+import { createSession, PHASE, DEFAULT_FREEZE_MINUTES } from '../shared/live.mjs';
 
 /**
  * Build a minimal wire timeline.
@@ -572,7 +572,7 @@ test('reveal flips on within one epoch replay as counts cross the threshold', ()
 // ------------------------------------------------------------- freeze
 
 test('resolveFreeze clips the board once the freeze starts', () => {
-  const params = { durationSec: 18000, frozenDurationSec: 3600, freezeMode: 'auto' };
+  const params = { durationSec: 18000, freezeDurationSec: 3600 };
   assert.deepEqual(resolveFreeze({ ...params, contestSec: 14399 }), {
     visibleSec: 14399, frozen: false, frozenAtSec: 14400, revealPending: false,
   });
@@ -586,7 +586,7 @@ test('resolveFreeze clips the board once the freeze starts', () => {
 
 test('resolveFreeze with reveal unlocks the true board', () => {
   const result = resolveFreeze({
-    contestSec: 18000, durationSec: 18000, frozenDurationSec: 3600, freezeMode: 'auto', revealed: true,
+    contestSec: 18000, durationSec: 18000, freezeDurationSec: 3600, revealed: true,
   });
   assert.equal(result.visibleSec, 18000);
   assert.equal(result.frozen, false);
@@ -594,7 +594,7 @@ test('resolveFreeze with reveal unlocks the true board', () => {
 
 test('resolveFreeze never freezes when the mode is never', () => {
   const result = resolveFreeze({
-    contestSec: 15000, durationSec: 18000, frozenDurationSec: 3600, freezeMode: 'never',
+    contestSec: 15000, durationSec: 18000, freezeDurationSec: 3600, freezeEnabled: false,
   });
   assert.equal(result.visibleSec, 15000);
   assert.equal(result.frozen, false);
@@ -603,7 +603,7 @@ test('resolveFreeze never freezes when the mode is never', () => {
 
 test('resolveFreeze is a no-op for contests without a freeze window', () => {
   const result = resolveFreeze({
-    contestSec: 15000, durationSec: 18000, frozenDurationSec: 0, freezeMode: 'auto',
+    contestSec: 15000, durationSec: 18000, freezeDurationSec: 0,
   });
   assert.equal(result.visibleSec, 15000);
   assert.equal(result.frozen, false);
@@ -611,9 +611,135 @@ test('resolveFreeze is a no-op for contests without a freeze window', () => {
 
 test('resolveFreeze clamps beyond the contest duration', () => {
   const result = resolveFreeze({
-    contestSec: 99999, durationSec: 18000, frozenDurationSec: 0, freezeMode: 'auto',
+    contestSec: 99999, durationSec: 18000, freezeDurationSec: 0,
   });
   assert.equal(result.visibleSec, 18000);
+});
+
+test('a freeze can be requested for a contest that declares none', () => {
+  // The ranklist says no freeze, but the VP explicitly asks for the last hour.
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 1,
+    durationSec: 18000,
+    frozenDurationSec: 0,
+    events: [],
+  });
+  const t0 = 1_000_000_000_000;
+
+  const off = createSession(timeline, { startAt: t0, now: t0 });
+  assert.equal(off.freezeEnabled, false, 'a declared zero freeze stays off by default');
+  assert.equal(off.update(t0 + 15_000_000).frozen, false);
+
+  const on = createSession(timeline, {
+    startAt: t0, now: t0, freezeEnabled: true, freezeMinutes: 60,
+  });
+  const frozen = on.update(t0 + 15_000_000);
+  assert.equal(frozen.frozen, true);
+  assert.equal(frozen.visibleSec, 14400, 'the explicit hour applies');
+});
+
+test('an undeclared freeze length falls back to the 60-minute convention', () => {
+  const timeline = makeTimeline({
+    teams: 10, problems: 1, durationSec: 18000, frozenDurationSec: 3600, events: [],
+  });
+  // Drop the declared length entirely: the 60-minute convention takes over.
+  delete timeline.contest.frozenDurationSec;
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0 });
+  assert.equal(session.freezeDurationSec, DEFAULT_FREEZE_MINUTES * 60);
+  assert.equal(session.freezeEnabled, true);
+  assert.equal(session.update(t0 + 15_000_000).frozen, true);
+});
+
+test('the declared freeze length is adopted when present', () => {
+  const timeline = makeTimeline({
+    teams: 10, problems: 1, durationSec: 18000, frozenDurationSec: 1800, events: [],
+  });
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0 });
+  assert.equal(session.freezeDurationSec, 1800);
+  // A 30-minute freeze starts at 16200, so 15000 is still live.
+  assert.equal(session.update(t0 + 15_000_000).frozen, false);
+  assert.equal(session.update(t0 + 15_000_000).visibleSec, 15000);
+  const frozen = session.update(t0 + 16_300_000);
+  assert.equal(frozen.frozen, true);
+  assert.equal(frozen.visibleSec, 16200);
+});
+
+test('the freeze length can be changed mid-VP', () => {
+  const timeline = makeTimeline({
+    teams: 10, problems: 1, durationSec: 18000, frozenDurationSec: 3600, events: [],
+  });
+  const t0 = 1_000_000_000_000;
+  const session = createSession(timeline, { startAt: t0, now: t0 });
+  assert.equal(session.update(t0 + 16_000_000).visibleSec, 14400);
+  session.setFreezeMinutes(120, t0 + 16_000_000);
+  assert.equal(session.update(t0 + 16_000_000).visibleSec, 10800);
+  session.setFreezeEnabled(false, t0 + 16_000_000);
+  const live = session.update(t0 + 16_000_000);
+  assert.equal(live.frozen, false);
+  assert.equal(live.visibleSec, 16000);
+});
+
+// ------------------------------------------------- live submit counts
+
+test('problemStatus reports distinct submitting teams as well as solvers', () => {
+  const timeline = makeTimeline({
+    teams: 30,
+    problems: 2,
+    events: [
+      // P0: 3 submitters, 2 solvers
+      [10, 0, 0, RESULT.WA], [11, 1, 0, RESULT.AC], [12, 2, 0, RESULT.AC],
+      // P1: 1 submitter, 0 solvers
+      [13, 3, 1, RESULT.TLE],
+    ],
+  });
+  const { stats } = replay(timeline, 9999);
+  assert.deepEqual(stats.solved, [2, 0]);
+  assert.deepEqual(stats.submitted, [3, 1]);
+});
+
+test('repeated submissions by one team count once towards the submitted total', () => {
+  const timeline = makeTimeline({
+    teams: 30,
+    problems: 1,
+    events: [
+      [10, 0, 0, RESULT.WA],
+      [20, 0, 0, RESULT.WA],
+      [30, 0, 0, RESULT.WA],
+    ],
+  });
+  const { stats } = replay(timeline, 9999);
+  assert.equal(stats.submitted[0], 1, 'one distinct submitting team');
+  assert.equal(stats.solved[0], 0);
+});
+
+test('submitted counts follow the reveal scope', () => {
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 1,
+    official: [true, false, false, false, false, false, false, false, false, false],
+    events: [[10, 1, 0, RESULT.WA], [20, 2, 0, RESULT.WA]],
+  });
+  assert.equal(replay(timeline, 9999, { revealScope: 'all' }).stats.submitted[0], 2);
+  assert.equal(replay(timeline, 9999, { revealScope: 'official' }).stats.submitted[0], 0);
+});
+
+test('submitted counts rewind correctly when seeking backwards', () => {
+  const timeline = makeTimeline({
+    teams: 30,
+    problems: 1,
+    events: [
+      [100, 0, 0, RESULT.WA],
+      [200, 1, 0, RESULT.WA],
+      [300, 2, 0, RESULT.WA],
+    ],
+  });
+  const epoch = createEpochReplay(timeline, { snapshotIntervalSec: 100 });
+  assert.equal(epoch.frameAt(350).stats.submitted[0], 3);
+  assert.equal(epoch.frameAt(150).stats.submitted[0], 1, 'rewound');
+  assert.equal(epoch.frameAt(250).stats.submitted[0], 2);
 });
 
 // ------------------------------------------------------------- session
@@ -680,7 +806,7 @@ test('freeze mode never keeps the board live to the end', () => {
     events: [[600, 0, 0, RESULT.AC], [15000, 0, 1, RESULT.AC]],
   });
   const t0 = 1_000_000_000_000;
-  const session = createSession(timeline, { startAt: t0, now: t0, freezeMode: 'never' });
+  const session = createSession(timeline, { startAt: t0, now: t0, freezeEnabled: false });
   const frame = session.update(t0 + 16_000_000);
   assert.equal(frame.frozen, false);
   assert.equal(frame.visibleSec, 16000);

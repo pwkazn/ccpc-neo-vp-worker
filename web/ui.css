@@ -17,8 +17,12 @@
   --solved-fg: #d7f7e6;
   --failed: #6b2029;
   --failed-fg: #ffd7dc;
-  --pending: #54420f;
-  --pending-fg: #ffe9a8;
+  /* Amber is reserved for "the board is frozen" badges. A frozen *cell* is
+     blue, matching the classic ICPC "submitted, result unknown" marker. */
+  --pending: #ffd166;
+  --pending-fg: #4a3a00;
+  --pending-cell: #1e5fa8;
+  --pending-cell-fg: #e8f3ff;
   --gold: #e0b32c;
   --row-height: 30px;
   --head-height: 56px;
@@ -41,8 +45,10 @@
     --solved-fg: #093a1c;
     --failed: #f3aab2;
     --failed-fg: #4d0f14;
-    --pending: #f2de9c;
+    --pending: #f6cf6a;
     --pending-fg: #4a3a00;
+    --pending-cell: #a8cdf5;
+    --pending-cell-fg: #0b2f57;
   }
 }
 
@@ -314,6 +320,10 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--bg-ele
 .board__inner { position: relative; }
 
 .board__head {
+  /* The header itself sticks to the top of the scroller. Its children are
+     positioned *absolutely* rather than as sticky children: a sticky child
+     sticks to this box's padding edge and, in document order, the cells stacked
+     diagonally down the header instead of sitting in one row. */
   position: sticky;
   top: 0;
   z-index: 5;
@@ -332,21 +342,29 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--bg-ele
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
+  color: var(--fg-muted);
 }
 
+/* The identity columns are pinned horizontally inside the header. */
 .board__head .col-rank,
 .board__head .col-team,
 .board__head .col-org,
 .board__head .col-solved,
 .board__head .col-penalty {
-  position: sticky;
+  position: absolute;
+  top: 0;
   z-index: 7;
+  height: 100%;
   background: var(--bg-elev);
   justify-content: flex-start;
   align-items: flex-start;
   padding-left: 9px;
 }
-.head-cell.col-rank, .head-cell.col-solved, .head-cell.col-penalty { justify-content: center; align-items: center; padding-left: 0; }
+.head-cell.col-rank, .head-cell.col-solved, .head-cell.col-penalty {
+  justify-content: center;
+  align-items: center;
+  padding-left: 0;
+}
 .board__head .col-penalty { border-right: 1px solid var(--border-strong); }
 
 .board__head-probs {
@@ -461,7 +479,22 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--bg-ele
 .cell--solved { background: var(--solved) !important; color: var(--solved-fg); font-weight: 600; }
 .cell--hidden-solve { background: color-mix(in srgb, var(--solved) 55%, var(--bg)) !important; color: var(--solved-fg); }
 .cell--failed { background: var(--failed) !important; color: var(--failed-fg); }
-.cell--pending { background: var(--pending) !important; color: var(--pending-fg); }
+/* Frozen, submitted, outcome unknown — the classic ICPC blue question mark. */
+.cell--pending {
+  background: var(--pending-cell) !important;
+  color: var(--pending-cell-fg);
+  font-weight: 700;
+}
+.cell--pending::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    135deg, transparent 0 5px, rgba(255, 255, 255, .07) 5px 10px
+  );
+}
+.row-cell.cell { position: relative; }
 
 /* A changed value gets one soft flash; the row itself keeps animating. */
 @keyframes cellFlash {

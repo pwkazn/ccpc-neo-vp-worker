@@ -214,9 +214,56 @@ test('column order and cell content stay consistent when the order is not identi
 });
 
 test('headerTitle explains a hidden problem and reports live counts', () => {
-  assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7), /未达门限/);
-  assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7), /7 队/);
-  const shown = headerTitle({ alias: 'A', title: 'Alpha' }, true, 123);
+  assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7, 19), /未达门限/);
+  assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7, 19), /7 队/);
+  assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7, 19), /19 队/);
+  const shown = headerTitle({ alias: 'A', title: 'Alpha' }, true, 123, 456);
   assert.match(shown, /A — Alpha/);
-  assert.match(shown, /123 队/);
+  assert.match(shown, /123 队 \/ 提交 456 队/);
+});
+
+test('a frozen board renders unresolved attempts as blue pending cells', () => {
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 2,
+    events: [
+      [100, 0, 0, RESULT.AC], // a known solve
+      [200, 1, 1, RESULT.WA], // an attempt with no outcome
+    ],
+  });
+  const { state } = replay(timeline, 5000);
+
+  // Live (unfrozen) the attempt is red.
+  const live = cellContent(state, 1, 1, null, { frozen: false });
+  assert.equal(live.text, '-1');
+  assert.equal(live.className, 'cell cell--failed');
+  assert.equal(live.pending, false);
+
+  // Frozen it becomes the ICPC-style blue question mark with the attempt count.
+  const frozen = cellContent(state, 1, 1, null, { frozen: true });
+  assert.equal(frozen.text, '?1');
+  assert.equal(frozen.className, 'cell cell--pending');
+  assert.equal(frozen.pending, true);
+
+  // A solved problem is unaffected by the freeze.
+  const solved = cellContent(state, 0, 0, null, { frozen: true });
+  assert.equal(solved.className, 'cell cell--solved');
+  assert.equal(solved.pending, false);
+
+  // An untouched problem stays empty.
+  assert.equal(cellContent(state, 2, 0, null, { frozen: true }).text, '');
+});
+
+test('pending cell counts every attempt the team made', () => {
+  const timeline = makeTimeline({
+    teams: 10,
+    problems: 1,
+    events: [
+      [100, 0, 0, RESULT.WA],
+      [200, 0, 0, RESULT.TLE],
+      [300, 0, 0, RESULT.RTE],
+    ],
+  });
+  const { state } = replay(timeline, 5000);
+  assert.equal(cellContent(state, 0, 0, null, { frozen: true }).text, '?3');
 });

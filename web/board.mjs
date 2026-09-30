@@ -56,9 +56,12 @@ export const STICKY_OFFSETS = (() => {
  * @param {ArrayLike<number>|null} [triesFallback] legacy per-team attempt counts
  *   (`null` when the timeline is exact; a per-problem value of `-1` also means
  *   "use the live count")
- * @returns {{ text: string, className: string, solved: boolean, attempted: boolean }}
+ * @param {object} [options]
+ * @param {boolean} [options.frozen] when frozen, an unsolved but attempted
+ *   problem is an *unknown* result and is rendered as a pending `?N` cell
+ * @returns {{ text: string, className: string, solved: boolean, attempted: boolean, pending: boolean }}
  */
-export function cellContent(state, teamIdx, probIdx, triesFallback = null) {
+export function cellContent(state, teamIdx, probIdx, triesFallback = null, options = {}) {
   const key = teamIdx * state.problemCount + probIdx;
   const acAt = state.acAt[key];
   const live = state.subs[key];
@@ -73,28 +76,43 @@ export function cellContent(state, teamIdx, probIdx, triesFallback = null) {
       className: 'cell cell--solved',
       solved: true,
       attempted: true,
+      pending: false,
     };
   }
 
   if (tries > 0) {
+    // Frozen ranklists show this as "submitted, result unknown": the old ICPC
+    // board drew a blue question mark with the number of attempts.
+    if (options.frozen) {
+      return {
+        text: `?${tries}`,
+        className: 'cell cell--pending',
+        solved: false,
+        attempted: true,
+        pending: true,
+      };
+    }
     return {
       text: `-${tries}`,
       className: 'cell cell--failed',
       solved: false,
       attempted: true,
+      pending: false,
     };
   }
 
-  return { text: '', className: 'cell', solved: false, attempted: false };
+  return { text: '', className: 'cell', solved: false, attempted: false, pending: false };
 }
 
 /** Tooltip for a header cell. */
-export function headerTitle(problem, revealed, solved) {
+export function headerTitle(problem, revealed, solved, submitted) {
   if (!revealed) {
-    return `题号尚未显示：过题队伍数未达门限（当前 ${solved} 队）`
+    return `题号尚未显示：过题队伍数未达门限（当前过题 ${solved} 队，提交 ${submitted} 队）`
       + (problem.title ? `\n(题目：${problem.title})` : '');
   }
-  return `${problem.alias}${problem.title ? ` — ${problem.title}` : ''}\n当前过题：${solved} 队`;
+  const lines = [`${problem.alias}${problem.title ? ` — ${problem.title}` : ''}`];
+  lines.push(`过题 ${solved} 队 / 提交 ${submitted} 队`);
+  return lines.join('\n');
 }
 
 /**
@@ -208,23 +226,44 @@ export function createBoard({ container, timeline }) {
     return tr;
   }
 
+  /**
+   * Whether a problem's alias is visible *on this board*.
+   *
+   * While frozen the board behaves like the classic ICPC frozen ranklist: every
+   * problem's alias is shown, because the point of the freeze is to hide
+   * *results*, not problem identities. When live, the CCPC-new-ranklist reveal
+   * threshold applies.
+   */
+  function aliasVisible(probIdx) {
+    if (frame.frozen) return true;
+    return frame.visibleSec >= frame.stats.aliasRevealed[probIdx];
+  }
+
   function setText(node, text) {
     if (node.textContent !== text) node.textContent = text;
   }
 
-  /** Update text, flashing the cell when the value actually changed. */
+  /**
+   * Update text, flashing the cell **once** when the value actually changes.
+   *
+   * The previous version restarted the animation on every repaint, which made
+   * every solve count on the board blink continuously.
+   */
   function pulseText(node, text) {
     if (node.textContent === text) return;
     node.textContent = text;
     if (text === '') return;
-    node.classList.remove('is-changed');
-    void node.offsetWidth; // restart the animation
     node.classList.add('is-changed');
+    if (node._flashTimer) clearTimeout(node._flashTimer);
+    node._flashTimer = setTimeout(() => {
+      node.classList.remove('is-changed');
+      node._flashTimer = null;
+    }, 750);
   }
 
   /** Fill one row element from a board row. */
   function renderRow(tr, row) {
-    const { state, visibleSec, stats } = frame;
+    const { state, frozen, stats } = frame;
     const cells = tr._cells;
 
     let className = 'board__row';
@@ -249,19 +288,22 @@ export function createBoard({ container, timeline }) {
     for (let position = 0; position < problemCount; position++) {
       const probIdx = order[position];
       const td = cells[STICKY.length + position];
-      const content = cellContent(state, row.teamIdx, probIdx, frame.triesFallback);
-      const revealed = visibleSec >= stats.aliasRevealed[probIdx];
+      const content = cellContent(state, row.teamIdx, probIdx, frame.triesFallback, { frozen });
+      const revealed = aliasVisible(probIdx);
 
       // A solve on a still-hidden problem is shown as solved but tinted
       // differently, so it is visually clear the problem number is unknown.
-      const cls = revealed || !content.solved
-        ? content.className
-        : `${content.className} cell--hidden-solve`;
+      const cls = (!revealed && content.solved)
+        ? `${content.className} cell--hidden-solve`
+        : content.className;
 
       if (td.className !== cls) td.className = cls;
       if (td.dataset.prob !== String(probIdx)) td.dataset.prob = String(probIdx);
       if (td.dataset.revealed !== (revealed ? '1' : '0')) {
         td.dataset.revealed = revealed ? '1' : '0';
+      }
+      if (td.dataset.pending !== (content.pending ? '1' : '0')) {
+        td.dataset.pending = content.pending ? '1' : '0';
       }
       pulseText(td, content.text);
     }
@@ -269,7 +311,7 @@ export function createBoard({ container, timeline }) {
     tr._order = order;
   }
 
-  /** Header: live solve-count order, live counts, colour only when revealed. */
+  /** Header: live solve/submit counts, order, and colour only when revealed. */
   function renderHeader() {
     const { stats, visibleSec } = frame;
 
@@ -284,7 +326,8 @@ export function createBoard({ container, timeline }) {
     for (let probIdx = 0; probIdx < problemCount; probIdx++) {
       const entry = headers[probIdx];
       const solved = stats.solved[probIdx] ?? 0;
-      const revealed = visibleSec >= stats.aliasRevealed[probIdx];
+      const submitted = stats.submitted[probIdx] ?? 0;
+      const revealed = aliasVisible(probIdx);
 
       // Flash once when a problem's alias first appears.
       if (revealed && entry._wasRevealed === false) {
@@ -295,13 +338,14 @@ export function createBoard({ container, timeline }) {
       entry._wasRevealed = revealed;
 
       setText(entry.alias, revealed ? String(entry.problem.alias ?? '?') : '?');
-      pulseText(entry.count, String(solved));
+      // The header shows accepted / submitted as of the displayed second.
+      pulseText(entry.count, `${solved}/${submitted}`);
 
       // Toggle the state class rather than assigning the whole className, so
       // the reveal animation is never clobbered mid-flight.
       entry.cell.classList.toggle('is-hidden', !revealed);
 
-      const title = headerTitle(entry.problem, revealed, solved);
+      const title = headerTitle(entry.problem, revealed, solved, submitted);
       if (entry.cell.title !== title) entry.cell.title = title;
       if (entry.cell.dataset.count !== String(solved)) entry.cell.dataset.count = String(solved);
     }

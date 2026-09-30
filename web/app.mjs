@@ -49,7 +49,9 @@ const el = {
   fieldAbsolute: $('field-absolute'),
   startDelay: $('start-delay'),
   startAbsolute: $('start-absolute'),
-  freezeMode: $('freeze-mode'),
+  freezeEnabled: $('freeze-enabled'),
+  freezeMinutes: $('freeze-minutes'),
+  freezeHint: $('freeze-hint'),
   revealScope: $('reveal-scope'),
   setupError: $('setup-error'),
   btnStart: $('btn-start'),
@@ -63,7 +65,8 @@ const el = {
   footerSource: $('footer-source'),
 
   settingsDialog: $('settings-dialog'),
-  settingsFreeze: $('settings-freeze'),
+  settingsFreezeEnabled: $('settings-freeze-enabled'),
+  settingsFreezeMinutes: $('settings-freeze-minutes'),
   settingsScope: $('settings-scope'),
   settingsInfo: $('settings-info'),
 };
@@ -296,9 +299,15 @@ function applyUrlParams() {
   if (SPEEDS.includes(speed)) app.pendingSpeed = speed;
 
   const freeze = params.get('freeze');
-  if (freeze === 'auto' || freeze === 'never') {
-    el.freezeMode.value = freeze;
-    el.settingsFreeze.value = freeze;
+  if (freeze === '0' || freeze === 'off') {
+    el.freezeEnabled.checked = false;
+  } else if (freeze === '1' || freeze === 'on') {
+    el.freezeEnabled.checked = true;
+  }
+
+  const freezeMinutes = Number(params.get('freeze_minutes'));
+  if (Number.isFinite(freezeMinutes) && freezeMinutes > 0) {
+    el.freezeMinutes.value = String(freezeMinutes);
   }
 
   const scope = params.get('scope');
@@ -330,7 +339,8 @@ function syncUrl() {
   params.set('uk', app.selectedUk);
   if (app.session.startAt) params.set('start', String(Math.round(app.session.startAt)));
   if (app.session.speed !== 1) params.set('speed', String(app.session.speed));
-  if (app.session.freezeMode !== 'auto') params.set('freeze', app.session.freezeMode);
+  if (!app.session.freezeEnabled) params.set('freeze', 'off');
+  params.set('freeze_minutes', String(Math.round(app.session.freezeDurationSec / 60)));
   if (app.session.revealScope !== 'all') params.set('scope', app.session.revealScope);
   if (!app.session.officialOnly) params.set('official', '0');
   history.replaceState(null, '', `${location.pathname}?${params}`);
@@ -374,7 +384,8 @@ async function startVp() {
       startAt,
       now: Date.now(),
       speed: app.pendingSpeed ?? 1,
-      freezeMode: el.freezeMode.value,
+      freezeEnabled: el.freezeEnabled.checked,
+      freezeMinutes: Number(el.freezeMinutes.value) || undefined,
       revealScope: el.revealScope.value,
       officialOnly: el.officialOnly.checked,
     });
@@ -403,7 +414,8 @@ function enterCountdown() {
   el.seek.value = '0';
 
   el.officialOnly.checked = app.session.officialOnly;
-  el.settingsFreeze.value = app.session.freezeMode;
+  el.settingsFreezeEnabled.checked = app.session.freezeEnabled;
+  el.settingsFreezeMinutes.value = String(Math.round(app.session.freezeDurationSec / 60));
   el.settingsScope.value = app.session.revealScope;
 
   el.countdownMeta.textContent = buildCountdownMeta();
@@ -418,10 +430,10 @@ function buildCountdownMeta() {
     `队伍 ${timeline.teams.length}`,
     `题目 ${timeline.problems.length}`,
   ];
-  if (timeline.contest.frozenDurationSec > 0 && session.freezeMode !== 'never') {
-    parts.push(`封榜 ${Math.round(timeline.contest.frozenDurationSec / 60)} 分钟`);
+  if (session.freezeEnabled && session.freezeDurationSec > 0) {
+    parts.push(`最后 ${Math.round(session.freezeDurationSec / 60)} 分钟封榜`);
   } else {
-    parts.push('全程实时');
+    parts.push('全程实时（不封榜）');
   }
   if (timeline.coverage.exact === false) parts.push('⚠ 排序规则已降级（无提交时间轴）');
   parts.push(`开赛 ${new Date(session.startAt).toLocaleString('zh-CN', { hour12: false })}`);
@@ -436,13 +448,10 @@ function enterBoard() {
   el.footerSource.textContent = app.timeline.source.srkUrl
     ? `榜单文件: ${app.timeline.source.srkUrl.split('/').slice(-2).join('/')}`
     : '';
-  // The threshold is min(floor(N x 20%), 50).
-  const all = app.timeline.reveal.all;
-  const official = app.timeline.reveal.official;
-  el.settingsInfo.textContent = `题号门限 = min(⌊队数×20%⌋, 50)：`
-    + `全部队伍 ${all.threshold}（${all.teamsRanked} 队）`
-    + ` / 仅官方 ${official.threshold}（${official.teamsRanked} 队）。`
-    + `某题过题队数达到该值即显示题号。`;
+  // The threshold is min(floor(N x 20%), 50); the live value is reported in the
+  // player bar, so this dialog only explains the rule and the freeze settings.
+  el.settingsInfo.textContent = '题号门限 = min(⌊队数 × 20%⌋, 50)：某题过题队数达到该值即显示题号。'
+    + '封榜时榜单切换为 ICPC 封榜样式：题号全部可见，未出结果的提交显示为蓝色的 ?。';
   showView('board');
   app.lastBoardSec = -1;
 }
@@ -534,18 +543,21 @@ function renderBoard(frame) {
     button.classList.toggle('is-active', Number(button.dataset.speed) === frame.speed);
   }
 
-  const stats = frame.stats ?? frame.reveal;
+  const stats = frame.stats;
   const revealedCount = stats.aliasRevealed.filter((value) => value !== Infinity).length;
 
   const status = [];
   if (frame.detached) status.push('已脱离实时（拖动或暂停中）');
   if (frame.revealed) status.push('已解封：显示完整榜单');
-  else if (frame.frozen) status.push(`已封榜，冻结于 ${formatClock(frame.frozenAtSec)}`);
-  status.push(`门限 ${stats.threshold} 队`);
+  else if (frame.frozen) status.push(`已封榜，冻结于 ${formatClock(frame.frozenAtSec)}（题号全部可见，结果未知）`);
+  if (frame.frozen) status.push(`封榜前门限 ${stats.threshold} 队`);
+  else status.push(`门限 ${stats.threshold} 队`);
   el.playerStatus.textContent = status.join(' · ');
 
-  el.boardSummary.textContent = `共 ${frame.rows.length} 队 · 题目 ${revealedCount}/${stats.solved.length} 已显示`
-    + ` · 榜单截至 ${formatClock(frame.visibleSec)}`;
+  el.boardSummary.textContent = frame.frozen
+    ? `共 ${frame.rows.length} 队 · 已封榜 · 榜单截至 ${formatClock(frame.visibleSec)}`
+    : `共 ${frame.rows.length} 队 · 题目 ${revealedCount}/${stats.solved.length} 已显示`
+      + ` · 榜单截至 ${formatClock(frame.visibleSec)}`;
 
   // Repaint the board only when the displayed contest second actually changed.
   if (app.board && frame.visibleSec !== app.lastBoardSec) {
@@ -633,17 +645,30 @@ el.officialOnly.addEventListener('change', () => {
 
 el.btnSettings.addEventListener('click', () => {
   if (app.session) {
-    el.settingsFreeze.value = app.session.freezeMode;
+    el.settingsFreezeEnabled.checked = app.session.freezeEnabled;
+    el.settingsFreezeMinutes.value = String(Math.round(app.session.freezeDurationSec / 60));
     el.settingsScope.value = app.session.revealScope;
   }
   el.settingsDialog.showModal();
 });
 
-el.settingsFreeze.addEventListener('change', () => {
-  app.session?.setFreezeMode(el.settingsFreeze.value, Date.now());
-  el.freezeMode.value = el.settingsFreeze.value;
+el.settingsFreezeEnabled.addEventListener('change', () => {
+  app.session?.setFreezeEnabled(el.settingsFreezeEnabled.checked, Date.now());
+  el.freezeEnabled.checked = el.settingsFreezeEnabled.checked;
   syncUrl();
   updateUi();
+});
+
+el.settingsFreezeMinutes.addEventListener('change', () => {
+  const minutes = Number(el.settingsFreezeMinutes.value) || 60;
+  app.session?.setFreezeMinutes(minutes, Date.now());
+  el.freezeMinutes.value = String(minutes);
+  syncUrl();
+  updateUi();
+});
+
+el.freezeEnabled.addEventListener('change', () => {
+  el.settingsFreezeEnabled.checked = el.freezeEnabled.checked;
 });
 
 el.settingsScope.addEventListener('change', () => {

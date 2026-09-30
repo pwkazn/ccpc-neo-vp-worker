@@ -110,6 +110,7 @@ revealed(p, T) ⇔ T ≥ revealSec[p]
 - 桶 1 是**所有已揭示的题**，含未 AC 的题（它们仍然显示题号）。
 - 「剩余题目」= 未被桶 1 取走的题，所以桶 2/3 的题**必然未揭示**。
 - 桶 3 的「最晚一次提交」**不含 AC 之后的提交**（见第 4 条）。
+- 封榜时行内顺序**不变**：封榜只改「哪些题号可见」（全部可见）与「单元格怎么画」（蓝色 `?N`），`columnOrder()` 仍然按封榜时刻的 `acAt` / `lastSub` 计算，所以封榜期间顺序是冻结的、不会因新提交而跳动。
 - 桶 4 中「题号不显示」，但排序仍按题号。
 - 表格右侧格子内容（AC 时间、提交次数）**与别名是否显示无关**：未揭示但已 AC 的题会显示为绿色格子却不显示题号 —— 这正是新赛制「知道自己过了几题、不知道是哪题」的效果。
 
@@ -142,9 +143,9 @@ revealed(p, T) ⇔ T ≥ revealSec[p]
 
 顶部每个**题目列**同时表达三件事：
 
-1. **题号**：已揭示显示别名（`A`、`B`…），未揭示显示 `?`；
-2. **实时过题数**：截至**当前显示时刻**的去重过题队伍数（`statistics.accepted` 那个最终快照**不用**）；
-3. **底色**：仅在已揭示时着色（用 SRK 的 `problems[].style.backgroundColor`）；未揭示一律不着色，避免从颜色推断题号。
+1. **题号**：已揭示（或封榜中）显示别名（`A`、`B`…），未揭示显示 `?`；
+2. **过题数 / 提交数**：截至**当前显示时刻**的去重统计，显示为 `AC/总提交`（例如 `285/286`）。两个数都从回放事件流统计，**不用** `statistics.accepted` 那个最终快照；
+3. **底色**：仅在题号可见时着色（用 SRK 的 `problems[].style.backgroundColor`）；未揭示一律不着色，避免从颜色推断题号。
 
 **排序**：永远按**实时过题数降序**，同数按题目下标升序。因此：
 
@@ -213,8 +214,8 @@ totalPenalty[g] = floor_to_precision(penalty[g])
 **形式化**
 
 ```
-usesFreeze = (freezeMode ≠ never) ∧ frozenDuration > 0
-frozenAt   = duration − frozenDuration              （usesFreeze 时）
+usesFreeze = freezeEnabled ∧ window > 0
+frozenAt   = duration − window
 
 !usesFreeze          → visibleSec = clamp(T)
 T ≤ frozenAt         → visibleSec = clamp(T)         frozen = false
@@ -222,22 +223,54 @@ T >  frozenAt ∧ 未解封 → visibleSec = frozenAt        frozen = true,  rev
 T >  frozenAt ∧ 已解封 → visibleSec = clamp(T)        frozen = false
 ```
 
+`window`（封榜时长）的来源，按优先级：
+
+| 情况 | `window` | 默认 `freezeEnabled` |
+| --- | --- | --- |
+| 榜单文件 `frozenDuration` > 0 | 该值 | `true` |
+| 榜单文件显式写了 `frozenDuration: 0` | 60 分钟 | `false`（尊重"本场不封榜"） |
+| 榜单文件没有该字段 | 60 分钟（CCPC 惯例） | `true` |
+| 网页上手填了分钟数 | 手填值 | 由勾选框决定 |
+
+**封榜是「每场 VP 可选」的显示设置，不是榜单文件的属性**：任何比赛都可以勾选启用封榜并指定时长，包括那些榜单文件里 `frozenDuration` 为 0 的比赛。
+
+**封榜时的榜单形态（ICPC 经典封榜样式）**
+
+封榜隐藏的是**结果**，不是题号。因此封榜后：
+
+- **所有题号全部可见**（不再受门限约束）；
+- 未出结果的提交显示为**蓝色的 `?N`**（`N` = 该队对该题的提交次数），这就是「看得到交了、不知道结果」；
+- 已经 AC 的题照常显示绿色的用时；
+- 顶部每题的计数继续按**封榜时刻**显示（不再增长）。
+
+以 `icpc2026invitational-shenyang`（时长 18000s，冻结 3600s）在 t=16000s 实测：
+
+```
+badge=已封榜   clock=4:00:00（= frozenAt）
+header 13/13 题号全部可见：L:285/286  F:278/280  K:262/280  E:106/267  I:33/122 … M:0/8
+cells  pending=20  failed=0  solved=181
+pending 样例：?3@0  ?1@7  ?1@0  ?2@9
+```
+
+对照：**未封榜且未解封时**该场的题号只显示达到门限的那些，且 `?N` 不会出现（未 AC 的显示红色 `-N`）。
+
 - **面板时间（`T`）与榜单时间（`visibleSec`）分离**：封榜期间真实比赛时钟继续走（`T` 继续增大），但榜单被钉在 `frozenAt`。界面显示的是**榜单时间**，避免"时钟在走、榜单不动"的错觉。
-- 封榜期间：不再揭示新题号、过题数不再增长、行内顺序不再变化、顶部顺序冻结 —— 因为一切都从 `visibleSec` 的回放状态派生，而它被钉住了。
-- **解封**有两种触发：比赛到达 `duration` 时**自动解封**；或手动点「揭榜」。解封后 `visibleSec` 立刻放开到真实时间，该显示的全显示。
-- 「关闭封榜」模式（`freezeMode = never`）下 `usesFreeze` 为假，全程实时。
-- `frozenDuration = 0` 的场次（如 2026 CCPC 网络预选赛）本就没有封榜，等价于全程实时。
+- 封榜期间：题号不再增加、过题数不再增长、行内顺序不再变化、顶部顺序冻结 —— 因为一切都从 `visibleSec` 的回放状态派生。
+- **解封**有两种触发：比赛到达 `duration` 时**自动解封**；或手动点「解封」。解封后 `visibleSec` 放开到真实时间，蓝色 `?N` 变回真实的绿/红结果。
 
 **实现**
 
 | 步骤 | 位置 |
 | --- | --- |
 | 可见时间裁剪 | `shared/replay.mjs` → `resolveFreeze()`（纯函数） |
+| 封榜时长/开关的默认与来源 | `shared/live.mjs` → `createSession()` |
+| 运行时改开关与时长 | `shared/live.mjs` → `setFreezeEnabled()` / `setFreezeMinutes()` |
 | 自动解封判定 | `shared/live.mjs` → `isRevealed()` |
 | 阶段状态机 | `shared/live.mjs` → `phase()`（`pending/running/frozen/ended`） |
+| 封榜时题号全显 + `?N` 蓝色单元格 | `web/board.mjs` → `aliasVisible()`、`cellContent({frozen})` |
 | 界面徽标与按钮 | `web/app.mjs` → `renderBoard()` |
 
-**测试**：`test/rules.test.mjs` → "resolveFreeze clips the board once the freeze starts"、"with reveal unlocks the true board"、"never freezes when the mode is never"、"is a no-op for contests without a freeze window"、"clamps beyond the contest duration"、"session goes through countdown, running, frozen and revealed"、"a frozen session stops reflecting new events, and unfreezing reveals them"、"freeze mode never keeps the board live to the end"、"a whole contest freezes, holds, then fully unfreezes at the end"。
+**测试**：`test/rules.test.mjs` → "resolveFreeze clips the board once the freeze starts"、"with reveal unlocks the true board"、"never freezes when the mode is never"、"is a no-op for contests without a freeze window"、"clamps beyond the contest duration"、"a freeze can be requested for a contest that declares none"、"an undeclared freeze length falls back to the 60-minute convention"、"the declared freeze length is adopted when present"、"the freeze length can be changed mid-VP"、"session goes through countdown, running, frozen and revealed"、"a frozen session stops reflecting new events, and unfreezing reveals them"、"a whole contest freezes, holds, then fully unfreezes at the end"；`test/board.test.mjs` → "a frozen board renders unresolved attempts as blue pending cells"、"pending cell counts every attempt the team made"。
 
 真实数据核对：`icpc2026invitational-shenyang`（时长 18000s，冻结 3600s → `frozenAt = 14400`）：
 

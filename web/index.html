@@ -106,19 +106,28 @@
 
     <div class="field-row">
       <label class="field">
-        <span class="field__label">封榜模式</span>
-        <select id="freeze-mode" class="input">
-          <option value="auto" selected>自动（复刻现场：按榜单冻结时长封榜，结束自动解封）</option>
-          <option value="never">关闭封榜（全程真实）</option>
-        </select>
+        <span class="field__label">封榜</span>
+        <span class="switch">
+          <input id="freeze-enabled" type="checkbox" checked>
+          <span>启用封榜（任何比赛都可以封）</span>
+        </span>
+        <span class="field__hint" id="freeze-hint">默认封最后一小时；榜单文件自带冻结时长时以它为准。</span>
       </label>
 
+      <label class="field field--narrow">
+        <span class="field__label">封榜时长（分钟）</span>
+        <input id="freeze-minutes" class="input" type="number" min="1" step="5" value="60">
+      </label>
+    </div>
+
+    <div class="field-row">
       <label class="field">
         <span class="field__label">题号门限统计范围</span>
         <select id="reveal-scope" class="input">
-          <option value="all" selected>全部队伍（20%，最少 50 队）</option>
-          <option value="official">仅官方队伍（20%，最少 50 队）</option>
+          <option value="all" selected>全部队伍</option>
+          <option value="official">仅官方队伍</option>
         </select>
+        <span class="field__hint">门限 = min(⌊队数 × 20%⌋, 50)</span>
       </label>
     </div>
 
@@ -131,7 +140,7 @@
     <h2>新赛制要点</h2>
     <ol>
       <li>比赛结束前 1 小时封榜；封榜前榜单仍显示 AC 数、总罚时与各题提交情况。</li>
-      <li>题目别名在「过题队伍数达到 <code>max(⌊队数 × 20%⌋, 50)</code>」时才显示在榜单上。</li>
+      <li>题目别名在「过题队伍数达到 <code>min(⌊队数 × 20%⌋, 50)</code>」时才显示在榜单上。</li>
       <li>每支队伍列的题目顺序并不相同：
         <br>① 已显示题号的题按题号升序；
         <br>② 其余中该队已 AC 的按 AC 时刻升序；
@@ -169,11 +178,15 @@
   <form method="dialog" class="dialog__body">
     <h2>设置</h2>
     <label class="field">
-      <span class="field__label">封榜模式</span>
-      <select id="settings-freeze" class="input">
-        <option value="auto">自动（按榜单冻结时长）</option>
-        <option value="never">关闭封榜（全程真实）</option>
-      </select>
+      <span class="field__label">封榜</span>
+      <span class="switch">
+        <input id="settings-freeze-enabled" type="checkbox" checked>
+        <span>启用封榜（仅隐藏结果，题号全部可见）</span>
+      </span>
+    </label>
+    <label class="field">
+      <span class="field__label">封榜时长（分钟）</span>
+      <input id="settings-freeze-minutes" class="input" type="number" min="1" step="5" value="60">
     </label>
     <label class="field">
       <span class="field__label">题号门限统计范围</span>

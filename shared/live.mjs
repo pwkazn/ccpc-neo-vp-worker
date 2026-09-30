@@ -26,12 +26,18 @@ export const PHASE = Object.freeze({
 /** Playback speeds offered in the UI. */
 export const SPEEDS = Object.freeze([1, 2, 5, 10, 60, 300]);
 
+/** CCPC convention for the freeze window: the last hour. */
+export const DEFAULT_FREEZE_MINUTES = 60;
+
 /**
  * @param {object} timeline wire timeline
  * @param {object} [options]
  * @param {number} [options.startAt] epoch ms when the VP starts
  * @param {number} [options.speed] playback multiplier (1 = real time)
- * @param {'auto'|'never'} [options.freezeMode]
+ * @param {boolean} [options.freezeEnabled] false disables the freeze entirely
+ * @param {number} [options.freezeMinutes] freeze length in minutes; defaults to
+ *   the ranklist's own `frozenDuration`, or the CCPC convention of 60 minutes
+ *   when the ranklist declares none. Any contest can be frozen this way.
  * @param {'all'|'official'} [options.revealScope]
  * @param {boolean} [options.officialOnly] rank official teams only
  * @param {boolean} [options.autoReveal] unfreeze automatically once the contest ends
@@ -39,18 +45,35 @@ export const SPEEDS = Object.freeze([1, 2, 5, 10, 60, 300]);
  */
 export function createSession(timeline, options = {}) {
   const durationSec = timeline.contest?.durationSec ?? 0;
-  const frozenDurationSec = timeline.contest?.frozenDurationSec ?? 0;
+  /**
+   * `frozenDurationSec` is optional in the ranklist format. Three cases:
+   *   - a positive value: that is the author's freeze window, used as-is;
+   *   - an explicit 0: the ranklist says "no freeze", so default to off;
+   *   - absent: no information, so fall back to the CCPC convention (last hour).
+   */
+  const declaredFreezeSec = timeline.contest?.frozenDurationSec ?? null;
+  const declaredDuration = declaredFreezeSec ?? DEFAULT_FREEZE_MINUTES * 60;
   const now = options.now ?? Date.now();
+
+  // The freeze is a per-VP setting: any contest can be frozen, including one
+  // whose ranklist declares no freeze.
+  const freezeEnabled = options.freezeEnabled ?? (declaredFreezeSec !== 0);
+  const freezeDurationSec = Math.max(
+    0,
+    options.freezeMinutes !== undefined ? options.freezeMinutes * 60 : declaredDuration,
+  );
 
   const session = {
     timeline,
     durationSec,
-    frozenDurationSec,
+    declaredFreezeSec,
 
     now,
     startAt: options.startAt ?? now,
     speed: SPEEDS.includes(options.speed) ? options.speed : 1,
-    freezeMode: options.freezeMode === 'never' ? 'never' : 'auto',
+    freezeEnabled,
+    freezeDurationSec,
+
     revealScope: options.revealScope === 'official' ? 'official' : 'all',
     officialOnly: options.officialOnly !== false,
     autoReveal: options.autoReveal !== false,
@@ -110,8 +133,8 @@ export function createSession(timeline, options = {}) {
     return resolveFreeze({
       contestSec: currentSec(),
       durationSec: session.durationSec,
-      frozenDurationSec: session.frozenDurationSec,
-      freezeMode: session.freezeMode,
+      freezeDurationSec: session.freezeDurationSec,
+      freezeEnabled: session.freezeEnabled,
       revealed: session.isRevealed(),
     });
   };
@@ -266,8 +289,16 @@ export function createSession(timeline, options = {}) {
     return session.update(nowSec);
   };
 
-  session.setFreezeMode = function setFreezeMode(mode, nowSec = session.now) {
-    session.freezeMode = mode === 'never' ? 'never' : 'auto';
+  /** Enable or disable the freeze window. */
+  session.setFreezeEnabled = function setFreezeEnabled(enabled, nowSec = session.now) {
+    session.freezeEnabled = Boolean(enabled);
+    session.revision++;
+    return session.update(nowSec);
+  };
+
+  /** Change the freeze length in minutes. */
+  session.setFreezeMinutes = function setFreezeMinutes(minutes, nowSec = session.now) {
+    session.freezeDurationSec = Math.max(0, Number(minutes) || 0) * 60;
     session.revision++;
     return session.update(nowSec);
   };

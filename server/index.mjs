@@ -2,8 +2,9 @@
 /**
  * ccpc-neo-vp HTTP server.
  *
- * Serves the browser UI plus a small read-only JSON API that proxies RankLand
- * and converts SRK ranklists into the compact wire timeline the UI replays.
+ * Serves the browser UI plus a JSON API that proxies RankLand and converts
+ * SRK ranklists into the compact wire timeline the UI replays. Local SRK files
+ * can also be submitted directly for conversion.
  */
 
 import http from 'node:http';
@@ -16,6 +17,7 @@ import { buildTimeline, WIRE_VERSION } from './build-timeline.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(here, '..');
+const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
 
 const HELP = `ccpc-neo-vp —— CCPC 新赛制实时榜单模拟器
 
@@ -110,6 +112,54 @@ export function sendJson(req, res, status, payload, { cacheSeconds = 0 } = {}) {
 
 function sendError(req, res, status, code, message) {
   sendJson(req, res, status, { error: { code, message } });
+}
+
+/** Read and parse a bounded JSON request body. */
+function readJsonBody(req, limit = MAX_IMPORT_BYTES) {
+  const declaredLength = Number(req.headers['content-length']);
+  if (Number.isFinite(declaredLength) && declaredLength > limit) {
+    req.resume();
+    const error = new Error(`请求体超过 ${Math.floor(limit / 1024 / 1024)} MiB 限制`);
+    error.httpStatus = 413;
+    error.code = 'payload_too_large';
+    throw error;
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let failed = false;
+    req.on('data', (chunk) => {
+      if (failed) return;
+      size += chunk.byteLength;
+      if (size > limit) {
+        failed = true;
+        req.resume();
+        const error = new Error(`请求体超过 ${Math.floor(limit / 1024 / 1024)} MiB 限制`);
+        error.httpStatus = 413;
+        error.code = 'payload_too_large';
+        reject(error);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (failed) return;
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch (cause) {
+        const error = new Error(`请求体不是合法 JSON: ${cause.message}`);
+        error.httpStatus = 400;
+        error.code = 'invalid_json';
+        reject(error);
+      }
+    });
+    req.on('error', (cause) => {
+      if (failed) return;
+      failed = true;
+      reject(cause);
+    });
+  });
 }
 
 /**
@@ -239,8 +289,9 @@ export async function createServer(options) {
     try {
       if (verbose) log(`→ ${req.method} ${pathname}${url.search}`);
 
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
-        sendError(req, res, 405, 'method_not_allowed', '仅支持 GET/HEAD');
+      const isImportRequest = pathname === '/api/import' && req.method === 'POST';
+      if (req.method !== 'GET' && req.method !== 'HEAD' && !isImportRequest) {
+        sendError(req, res, 405, 'method_not_allowed', '仅支持 GET/HEAD；POST 仅用于 /api/import');
         return;
       }
 
@@ -270,6 +321,70 @@ export async function createServer(options) {
             connectMs: rankland.connectTimeoutMs,
             stallMs: rankland.stallTimeoutMs,
           },
+        });
+        return;
+      }
+
+      if (pathname === '/api/import') {
+        if (req.method !== 'POST') {
+          sendError(req, res, 405, 'method_not_allowed', '导入接口仅支持 POST');
+          return;
+        }
+        const contentType = String(req.headers['content-type'] ?? '')
+          .split(';', 1)[0]
+          .trim()
+          .toLowerCase();
+        if (contentType !== 'application/json' && !contentType.endsWith('+json')) {
+          req.resume();
+          sendError(req, res, 415, 'unsupported_media_type', '请使用 application/json');
+          return;
+        }
+
+        const body = await readJsonBody(req);
+        const ranklist = body?.ranklist ?? body;
+        if (!ranklist || typeof ranklist !== 'object'
+          || !Array.isArray(ranklist.problems) || !Array.isArray(ranklist.rows)) {
+          sendError(req, res, 400, 'invalid_ranklist', '请求需要 Standard Ranklist JSON，且包含 problems[] 和 rows[]');
+          return;
+        }
+        if (body?.ranklist !== undefined
+          && body.name !== undefined && typeof body.name !== 'string') {
+          sendError(req, res, 400, 'invalid_name', 'name 必须是字符串');
+          return;
+        }
+        if (body?.ranklist !== undefined && typeof body.name === 'string' && body.name.length > 200) {
+          sendError(req, res, 400, 'invalid_name', 'name 最长 200 个字符');
+          return;
+        }
+        if (body?.ranklist !== undefined
+          && body.uk !== undefined && typeof body.uk !== 'string') {
+          sendError(req, res, 400, 'invalid_uk', 'uk 必须是字符串');
+          return;
+        }
+        if (body?.ranklist !== undefined && typeof body.uk === 'string' && body.uk.length > 128) {
+          sendError(req, res, 400, 'invalid_uk', 'uk 最长 128 个字符');
+          return;
+        }
+
+        const name = body?.ranklist && typeof body.name === 'string' ? body.name.trim() : '';
+        const uk = body?.ranklist && typeof body.uk === 'string' && body.uk.trim()
+          ? body.uk.trim()
+          : 'local-import';
+
+        let timeline;
+        try {
+          timeline = buildTimeline(ranklist, {
+            uk,
+            name: name || undefined,
+          });
+        } catch (error) {
+          sendError(req, res, 400, 'invalid_ranklist', `无法处理榜单数据: ${error.message}`);
+          return;
+        }
+
+        sendJson(req, res, 200, {
+          success: true,
+          data: { timeline },
         });
         return;
       }

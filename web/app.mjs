@@ -55,6 +55,9 @@ const el = {
   revealScope: $('reveal-scope'),
   setupError: $('setup-error'),
   btnStart: $('btn-start'),
+  ranklistFile: $('ranklist-file'),
+  btnImport: $('btn-import'),
+  importHint: $('import-hint'),
 
   countdownValue: $('countdown-value'),
   countdownMeta: $('countdown-meta'),
@@ -75,6 +78,7 @@ const app = {
   contests: [],
   contestsFetchedAt: 0,
   selectedUk: null,
+  importedTimeline: null,
   timeline: null,
   session: null,
   board: null,
@@ -262,7 +266,10 @@ function renderContestList() {
     if (!disabled) {
       li.addEventListener('click', () => {
         app.selectedUk = contest.uk;
+        app.importedTimeline = null;
+        el.importHint.textContent = '已选择 RankLand 比赛';
         el.btnStart.disabled = false;
+        el.btnStart.textContent = '加载并开始';
         syncFreezeDefaults(contest);
         renderContestList();
         el.contestList.scrollIntoView({ block: 'nearest' });
@@ -362,6 +369,9 @@ function toLocalInputValue(epochMs) {
 
 /** Keep the query string in sync so the current VP is bookmarkable. */
 function syncUrl() {
+  // Imported files are not persisted, so their local-import key is not a
+  // reloadable URL. The import action clears any previous query string.
+  if (app.importedTimeline) return;
   if (!app.session || !app.selectedUk) return;
   const params = new URLSearchParams();
   params.set('uk', app.selectedUk);
@@ -403,10 +413,12 @@ async function startVp() {
 
   setError(null);
   el.btnStart.disabled = true;
-  el.btnStart.textContent = '正在下载并回放…';
+  el.btnImport.disabled = true;
+  const importedTimeline = app.importedTimeline;
+  el.btnStart.textContent = importedTimeline ? '正在载入本地榜单…' : '正在下载并回放…';
 
   try {
-    const { timeline } = await fetchTimeline(app.selectedUk);
+    const timeline = importedTimeline ?? (await fetchTimeline(app.selectedUk)).timeline;
     app.timeline = timeline;
     app.session = createSession(timeline, {
       startAt,
@@ -421,16 +433,71 @@ async function startVp() {
     syncUrl();
     enterCountdown();
   } catch (error) {
-    // Surface the concrete reason plus a pointer to the diagnostic endpoint,
-    // because this failure is usually a network/route problem.
+    // Keep RankLand diagnostics for upstream failures; imported data has a
+    // separate validation hint below.
     const parts = [`加载失败：${error.message}`];
     if (error.code) parts.push(`（${error.code}）`);
-    parts.push('—— 可打开 /api/diagnose?uk=' + encodeURIComponent(app.selectedUk) + ' 查看详情，'
-      + '或看服务端终端日志；若网络较慢可设置 RL_CONNECT_TIMEOUT_MS / RL_STALL_TIMEOUT_MS 后重启。');
+    if (importedTimeline) {
+      parts.push('—— 请检查导入文件是否为有效的 Standard Ranklist JSON。');
+    } else {
+      parts.push('—— 可打开 /api/diagnose?uk=' + encodeURIComponent(app.selectedUk) + ' 查看详情，'
+        + '或看服务端终端日志；若网络较慢可设置 RL_CONNECT_TIMEOUT_MS / RL_STALL_TIMEOUT_MS 后重启。');
+    }
     setError(parts.join(' '));
   } finally {
-    el.btnStart.disabled = false;
+    el.btnStart.disabled = !app.selectedUk;
+    el.btnImport.disabled = false;
     el.btnStart.textContent = '加载并开始';
+  }
+}
+
+async function importRanklistFile(file) {
+  if (!file) return;
+  setError(null);
+  el.btnImport.disabled = true;
+  el.btnStart.disabled = true;
+  el.contestSearch.disabled = true;
+  el.contestList.setAttribute('aria-busy', 'true');
+  el.importHint.textContent = `正在导入 ${file.name}…`;
+
+  try {
+    const response = await fetch('/api/import', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: await file.text(),
+    });
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      throw new Error(`导入接口返回了无效响应（HTTP ${response.status}）`);
+    }
+    if (!response.ok) throw new Error(body?.error?.message ?? `HTTP ${response.status}`);
+
+    const timeline = body?.data?.timeline;
+    if (!timeline?.contest || !Array.isArray(timeline.teams) || !Array.isArray(timeline.problems)) {
+      throw new Error('导入接口没有返回有效的榜单时间轴');
+    }
+    if (!timeline.name) timeline.name = file.name.replace(/\.json$/i, '');
+
+    app.importedTimeline = timeline;
+    app.selectedUk = timeline.uk || 'local-import';
+    app.pendingStartAt = null;
+    app.pendingSpeed = null;
+    history.replaceState(null, '', location.pathname);
+    el.btnStart.disabled = false;
+    el.btnStart.textContent = '开始本地榜单';
+    el.importHint.textContent = `${file.name} · ${timeline.teams.length} 队 · ${timeline.problems.length} 题`;
+    renderContestList();
+  } catch (error) {
+    el.importHint.textContent = '导入失败';
+    setError(`导入榜单失败：${error.message}`);
+  } finally {
+    el.btnImport.disabled = false;
+    el.btnStart.disabled = !app.selectedUk;
+    el.contestSearch.disabled = false;
+    el.contestList.removeAttribute('aria-busy');
+    el.ranklistFile.value = '';
   }
 }
 
@@ -473,9 +540,11 @@ function enterBoard() {
     app.board = createBoard({ container: el.board, timeline: app.timeline });
   }
   app.board.setPinnedTeam(app.pinnedTeamId);
-  el.footerSource.textContent = app.timeline.source.srkUrl
-    ? `榜单文件: ${app.timeline.source.srkUrl.split('/').slice(-2).join('/')}`
-    : '';
+  el.footerSource.textContent = app.importedTimeline
+    ? '榜单文件: 本地导入'
+    : app.timeline.source.srkUrl
+      ? `榜单文件: ${app.timeline.source.srkUrl.split('/').slice(-2).join('/')}`
+      : '';
   // The threshold is min(floor(N x 20%), 50); the live value is reported in the
   // player bar, so this dialog only explains the rule and the freeze settings.
   el.settingsInfo.textContent = '题号门限 = min(⌊队数 × 20%⌋, 50)：某题过题队数达到该值即显示题号。'
@@ -616,6 +685,10 @@ el.setup.addEventListener('submit', (event) => {
 
 el.contestSearch.addEventListener('input', renderContestList);
 el.startMode.addEventListener('change', setupStartMode);
+el.btnImport.addEventListener('click', () => el.ranklistFile.click());
+el.ranklistFile.addEventListener('change', () => {
+  void importRanklistFile(el.ranklistFile.files?.[0]);
+});
 
 el.btnCountdownCancel.addEventListener('click', () => {
   stopLoop();

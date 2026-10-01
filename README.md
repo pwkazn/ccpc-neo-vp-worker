@@ -5,8 +5,8 @@
 选一场比赛 → 定开赛时刻 → 倒计时 → 看榜单一秒一秒长出来。做题在别的平台（QOJ / 牛客 / PTA 等）进行，本工具只提供榜单。
 
 ```bash
-nix run .          # 或  node server/index.mjs
-# 打开 http://127.0.0.1:5173
+npm install
+npm run dev        # Wrangler 本地开发，打开 http://127.0.0.1:8787
 ```
 
 ---
@@ -20,17 +20,22 @@ nix run .          # 或  node server/index.mjs
 - **封榜**（任意比赛可选）：切到 ICPC 经典封榜样式 —— 题号全部可见，未出结果的提交显示为蓝色 `?N`，且 pending 提交**继续实时出现**；比赛计时器与进度条照常走。
 - **金银铜奖区**：名次格按奖项半径染色，只给正式队伍，名额按当前正式队伍数实时算。
 - **可收藏的 URL**：一场 VP 的全部设置都在地址栏里。
-- 零运行时依赖，无构建步骤；深色/浅色主题，`prefers-reduced-motion` 下关闭动效。
+- Cloudflare Workers 运行时零依赖；深色/浅色主题，`prefers-reduced-motion` 下关闭动效。
 
 ---
 
 ## 安装
 
-需要 Node **≥ 20**。项目没有 `dependencies`，不需要 `npm install`，也没有构建步骤。
+需要 Node **≥ 22** 和 Wrangler 4。项目将 API 部署为 Cloudflare Worker，静态页面由 Worker Assets 提供。
 
 ```bash
-node server/index.mjs          # 或 npm start
+npm install
+npm run dev                    # 本地 Worker
+npm run deploy:dry             # 上传前检查，不会发布
+npm run deploy                 # 部署到当前 wrangler 登录的账户
 ```
+
+本地替代方案仍可运行原 Node 服务：`npm start`，打开 `http://127.0.0.1:5173`。
 
 ### NixOS
 
@@ -122,7 +127,17 @@ http://127.0.0.1:5173/?uk=ccpc2026preliminary&start=1790785531000&freeze_minutes
 
 榜单格式是 **Standard Ranklist (SRK) v0.3.13**，规范见 [algoux/standard-ranklist](https://github.com/algoux/standard-ranklist)。
 
-服务端抓取一次后归一化成紧凑「时间轴」，按 sha256 落盘缓存到 `$XDG_CACHE_HOME/ccpc-neo-vp/`（`contests.json`、`srk/`、`timeline/`）。用 `--cache-info` 看占用，`--clear-cache` 清空。
+Worker 抓取榜单后在 Worker 运行时构建紧凑「时间轴」，并通过 Cloudflare Cache API 缓存比赛列表和时间轴。原 Node 服务保留本地磁盘缓存，方便离线开发和旧版运行方式。
+
+比赛列表和榜单文件默认从 RankLand 获取；榜单归一化、时间轴构建和回放计算都在本地完成。也可以把本地 SRK 文件直接交给导入接口：
+
+```bash
+curl -X POST "http://127.0.0.1:8787/api/import" \
+  -H "Content-Type: application/json" \
+  --data-binary @ranklist.json
+```
+
+`POST /api/import` 接受原始 Standard Ranklist JSON，也接受 `{ "ranklist": <榜单>, "name": "显示名称", "uk": "本地标识" }`。接口会在本地构建并返回 `data.timeline`，不请求 RankLand；请求体上限为 50 MiB。导入结果不写入磁盘缓存。
 
 ### 网络
 
@@ -131,7 +146,7 @@ http://127.0.0.1:5173/?uk=ccpc2026preliminary&start=1790785531000&freeze_minutes
 - **连接超时**（默认 30 秒收不到响应头）
 - **读取停滞**（默认 45 秒没有新数据）
 
-可放宽后重启：
+Node 本地服务可设置环境变量后重启；Worker 部署可在 `wrangler.jsonc` 的 `vars` 中配置 `RL_CONNECT_TIMEOUT_MS`、`RL_STALL_TIMEOUT_MS` 或兼容的 `RL_BASE_URL`：
 
 ```bash
 RL_CONNECT_TIMEOUT_MS=60000 RL_STALL_TIMEOUT_MS=120000 nix run . -- --verbose
@@ -140,7 +155,7 @@ RL_CONNECT_TIMEOUT_MS=60000 RL_STALL_TIMEOUT_MS=120000 nix run . -- --verbose
 自检接口逐步测试「比赛列表 → 文件元信息 → 榜单下载 → 时间线构建」并报告每步耗时：
 
 ```bash
-curl "http://127.0.0.1:5173/api/diagnose?uk=ccpc2026preliminary"
+curl "http://127.0.0.1:8787/api/diagnose?uk=ccpc2026preliminary"
 ```
 
 ### 两种榜单数据形态
@@ -205,6 +220,9 @@ VP_E2E=1 npm run test:e2e       # 真实数据回归（需要网络）
 ## 项目结构
 
 ```
+worker.mjs           Cloudflare Worker API 入口
+wrangler.jsonc       Worker 与静态资源配置
+scripts/build.mjs    准备 Worker Assets 目录
 server/
   index.mjs          HTTP 服务、路由、CLI、keep-alive 调优
   rankland.mjs       RankLand 只读客户端（连接/停滞看门狗、退避重试）
@@ -220,11 +238,12 @@ web/                 无构建步骤的前端
   index.html  ui.css
   app.mjs            界面状态机与交互
   board.mjs          行虚拟化榜单渲染
+dist/                构建时生成，作为 Cloudflare Worker Assets 上传
 test/                node:test 测试 + fixtures
 docs/rules.md        规则形式化说明与测试对照
 ```
 
-前端是原生 ESM + CSS，没有框架、没有打包步骤：`/app/*` 与 `/shared/*` 由同一个 Node 服务提供，榜单用行虚拟化渲染 2700 行。
+前端是原生 ESM + CSS，没有框架；构建脚本只把 `/app/*` 与 `/shared/*` 整理到 Worker Assets 目录。榜单用行虚拟化渲染 2700 行。
 
 ---
 

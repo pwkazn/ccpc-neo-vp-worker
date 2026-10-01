@@ -78,6 +78,18 @@
 
     <ul id="contest-list" class="contest-list" role="listbox" aria-label="比赛列表"></ul>
 
+    <section class="import-entry" aria-label="导入本地榜单">
+      <div class="import-entry__copy">
+        <strong>使用本地榜单</strong>
+        <span class="field__hint">选择 Standard Ranklist JSON 文件</span>
+      </div>
+      <div class="import-entry__actions">
+        <input id="ranklist-file" type="file" accept=".json,application/json" hidden>
+        <button id="btn-import" class="btn" type="button">选择榜单文件</button>
+        <span id="import-hint" class="field__hint" role="status">尚未导入</span>
+      </div>
+    </section>
+
     <div class="field-row">
       <label class="field">
         <span class="field__label">开赛方式</span>
@@ -174,6 +186,7 @@
 <footer class="footer">
   <span id="footer-source" class="muted"></span>
   <span class="muted">· 数据来源 RankLand（rank.ac）· 非官方工具</span>
+  <span class="muted">· <a href="https://github.com/pwkazn/ccpc-neo-vp-worker" target="_blank" rel="noopener noreferrer">本项目地址</a> · <a href="https://github.com/pstron/ccpc-neo-vp" target="_blank" rel="noopener noreferrer">原项目地址</a></span>
 </footer>
 
 <dialog id="settings-dialog" class="dialog">

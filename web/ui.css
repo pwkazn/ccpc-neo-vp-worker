@@ -236,6 +236,19 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--bg-ele
 .field__label { font-size: 13px; color: var(--fg-muted); }
 .field__hint { font-size: 12px; color: var(--fg-muted); }
 .field-row { display: flex; gap: 14px; flex-wrap: wrap; }
+.import-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+.import-entry__copy,
+.import-entry__actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.import-entry__copy { align-items: flex-start; flex-direction: column; gap: 3px; }
+#import-hint { overflow-wrap: anywhere; }
 
 .input {
   font: inherit;
@@ -275,6 +288,7 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--bg-ele
 .contest-list li:hover { background: var(--bg-elev-2); }
 .contest-list li[aria-selected="true"] { background: var(--accent); color: var(--accent-fg); }
 .contest-list li[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+.contest-list[aria-busy="true"] { opacity: .55; pointer-events: none; }
 .contest-list .cl-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .contest-list .cl-meta { flex: 0 0 auto; font-size: 12px; color: var(--fg-muted); font-family: var(--font-mono); }
 .contest-list li[aria-selected="true"] .cl-meta { color: var(--accent-fg); }
@@ -537,13 +551,21 @@ code { font-family: var(--font-mono); font-size: .92em; background: var(--bg-ele
 .footer {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 7px 16px;
   border-top: 1px solid var(--border);
   font-size: 12px;
   background: var(--bg-elev);
 }
+.footer a { color: var(--accent); text-decoration: none; }
+.footer a:hover { text-decoration: underline; }
 
 @media (max-width: 900px) {
   .player { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 560px) {
+  .import-entry { align-items: stretch; flex-direction: column; }
+  .import-entry__actions { align-items: flex-start; flex-wrap: wrap; }
 }

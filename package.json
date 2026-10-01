@@ -2,23 +2,30 @@
   "name": "ccpc-neo-vp",
   "version": "0.1.0",
   "private": true,
-  "description": "CCPC 新赛制实时榜单模拟器 —— 基于 RankLand 历史榜单数据的虚拟参赛 (VP) 回放工具",
+  "description": "Cloudflare Workers 上的 CCPC 新赛制实时榜单模拟器，支持本地 Node.js 运行",
   "type": "module",
   "license": "MIT",
   "author": "DeepSeek-V4.1-Flash via DeepSeek Harness",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "main": "server/index.mjs",
   "bin": {
     "ccpc-neo-vp": "server/index.mjs"
   },
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:dry": "wrangler deploy --dry-run",
     "start": "node server/index.mjs",
     "test": "node --test",
     "test:e2e": "VP_E2E=1 node --test test/e2e.test.mjs"
   },
   "files": [
+    "worker.mjs",
+    "wrangler.jsonc",
+    "scripts",
     "server",
     "shared",
     "web",
@@ -32,5 +39,8 @@
     "vp",
     "rankland",
     "standard-ranklist"
-  ]
+  ],
+  "devDependencies": {
+    "wrangler": "^4.100.0"
+  }
 }

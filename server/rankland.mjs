@@ -23,8 +23,8 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_STALL_TIMEOUT_MS = 45_000;
 const DEFAULT_RETRIES = 3;
 
-const envNumber = (name) => {
-  const value = Number(process.env[name]);
+const envNumber = (name, environment) => {
+  const value = Number(environment?.[name] ?? globalThis.process?.env?.[name]);
   return Number.isFinite(value) && value > 0 ? value : undefined;
 };
 
@@ -76,23 +76,23 @@ function describeError(error) {
  */
 export function createRanklandClient(options = {}) {
   const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const environment = options.env ?? {};
   const connectTimeoutMs = options.connectTimeoutMs
-    ?? envNumber('RL_CONNECT_TIMEOUT_MS')
+    ?? envNumber('RL_CONNECT_TIMEOUT_MS', environment)
     ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const stallTimeoutMs = options.stallTimeoutMs
-    ?? envNumber('RL_STALL_TIMEOUT_MS')
+    ?? envNumber('RL_STALL_TIMEOUT_MS', environment)
     ?? DEFAULT_STALL_TIMEOUT_MS;
   const retries = options.retries ?? DEFAULT_RETRIES;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const log = options.log ?? (() => {});
 
   if (typeof fetchImpl !== 'function') {
-    throw new TypeError('global fetch is unavailable; Node >= 20 is required');
+    throw new TypeError('global fetch is unavailable');
   }
 
   const requestHeaders = {
     accept: 'application/json, text/plain, */*',
-    'user-agent': 'ccpc-neo-vp/0.1 (+personal use)',
   };
 
   /**
@@ -143,14 +143,16 @@ export function createRanklandClient(options = {}) {
       let text;
       if (response.body && typeof response.body.getReader === 'function') {
         const reader = response.body.getReader();
+        const decoder = new TextDecoder();
         const chunks = [];
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           arm(stallTimeoutMs);
-          if (value) chunks.push(value);
+          if (value) chunks.push(decoder.decode(value, { stream: true }));
         }
-        text = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
+        chunks.push(decoder.decode());
+        text = chunks.join('');
       } else {
         text = await response.text();
       }

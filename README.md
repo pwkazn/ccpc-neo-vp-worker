@@ -1,6 +1,6 @@
 # CCPC Neo VP
 
-![原项目](https://github.com/pstron/ccpc-neo-vp)
+[原项目](https://github.com/pstron/ccpc-neo-vp)
 
 **CCPC 新赛制「实时榜单」模拟器** —— 用 RankLand 的历史榜单数据，把一场已经结束的比赛按真实提交时间轴重新放一遍。
 

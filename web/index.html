@@ -62,7 +62,7 @@
   <span id="board-summary" class="muted"></span>
 </section>
 
-<main id="view-picker" class="view view--picker">
+<main id="view-picker" class="view view--picker" hidden>
   <form id="setup" class="setup" autocomplete="off">
     <h1>开始一场 VP</h1>
     <p class="setup__hint">
@@ -165,6 +165,13 @@
     </ol>
     <p class="muted">本工具仅个人学习使用，数据来自 RankLand 公开接口。</p>
   </aside>
+</main>
+
+<main id="view-loading" class="view view--countdown" hidden aria-busy="true">
+  <div class="countdown" role="status">
+    <p class="countdown__label">正在加载榜单…</p>
+    <p class="countdown__meta muted">正在获取比赛数据，请稍候。</p>
+  </div>
 </main>
 
 <main id="view-countdown" class="view view--countdown" hidden>

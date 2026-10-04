@@ -37,6 +37,7 @@ const el = {
   boardSummary: $('board-summary'),
 
   viewPicker: $('view-picker'),
+  viewLoading: $('view-loading'),
   viewCountdown: $('view-countdown'),
   viewBoard: $('view-board'),
 
@@ -86,6 +87,8 @@ const app = {
   /** contest second the board was last painted at (1 Hz cadence) */
   lastBoardSec: -1,
   lastPendingSec: -1,
+  lastRevision: -1,
+  lastRevealed: null,
   /** start time carried over from the URL until the timeline is loaded */
   pendingStartAt: null,
   /** playback speed carried over from the URL */
@@ -172,9 +175,10 @@ const startLabel = (iso) => {
 
 function showView(name) {
   el.viewPicker.hidden = name !== 'picker';
+  el.viewLoading.hidden = name !== 'loading';
   el.viewCountdown.hidden = name !== 'countdown';
   el.viewBoard.hidden = name !== 'board';
-  el.player.hidden = name === 'picker';
+  el.player.hidden = name !== 'board' && name !== 'countdown';
   el.filterbar.hidden = name !== 'board';
 }
 
@@ -322,7 +326,7 @@ function applyUrlParams() {
       el.startMode.value = 'absolute';
       el.startAbsolute.value = toLocalInputValue(epoch);
       setupStartMode();
-      applyImmediately = applyImmediately || epoch <= Date.now();
+      applyImmediately = true;
     }
   }
 
@@ -397,7 +401,7 @@ function resolveStartAt() {
   return Date.now() + delaySec * 1000;
 }
 
-async function startVp() {
+async function startVp({ useTimelineDefaults = false } = {}) {
   if (!app.selectedUk) {
     setError('请先选择一场比赛');
     return;
@@ -412,6 +416,7 @@ async function startVp() {
   }
 
   setError(null);
+  showView('loading');
   el.btnStart.disabled = true;
   el.btnImport.disabled = true;
   const importedTimeline = app.importedTimeline;
@@ -419,6 +424,7 @@ async function startVp() {
 
   try {
     const timeline = importedTimeline ?? (await fetchTimeline(app.selectedUk)).timeline;
+    if (useTimelineDefaults) syncFreezeDefaults(timeline.contest);
     app.timeline = timeline;
     app.session = createSession(timeline, {
       startAt,
@@ -443,6 +449,7 @@ async function startVp() {
       parts.push('—— 可打开 /api/diagnose?uk=' + encodeURIComponent(app.selectedUk) + ' 查看详情，'
         + '或看服务端终端日志；若网络较慢可设置 RL_CONNECT_TIMEOUT_MS / RL_STALL_TIMEOUT_MS 后重启。');
     }
+    showView('picker');
     setError(parts.join(' '));
   } finally {
     el.btnStart.disabled = !app.selectedUk;
@@ -515,6 +522,7 @@ function enterCountdown() {
 
   el.countdownMeta.textContent = buildCountdownMeta();
   showView('countdown');
+  updateUi();
   startLoop();
 }
 
@@ -641,7 +649,8 @@ function renderBoard(frame) {
   el.badgePhase.classList.toggle('badge--live', frame.phase === PHASE.RUNNING);
 
   el.btnReveal.hidden = !frame.revealPending;
-  el.btnPause.textContent = frame.detached ? '继续' : '暂停';
+  el.btnPause.disabled = frame.contestSec >= app.session.durationSec;
+  el.btnPause.textContent = el.btnPause.disabled ? '已结束' : frame.detached ? '继续' : '暂停';
   el.btnLive.hidden = !frame.detached;
   for (const button of el.speedButtons) {
     button.classList.toggle('is-active', Number(button.dataset.speed) === frame.speed);
@@ -667,13 +676,16 @@ function renderBoard(frame) {
 
   // Repaint when the board second changes, or — while frozen — when a new
   // pending second arrives, so pending submissions keep appearing live.
-  if (app.board && frame.boardSec !== app.lastBoardSec) {
-    app.lastBoardSec = frame.boardSec;
-    app.board.render(frame);
-  } else if (app.board && frame.pendingSec !== app.lastPendingSec) {
+  if (app.board && (frame.boardSec !== app.lastBoardSec
+    || frame.pendingSec !== app.lastPendingSec
+    || frame.revision !== app.lastRevision
+    || frame.revealed !== app.lastRevealed)) {
     app.board.render(frame);
   }
+  app.lastBoardSec = frame.boardSec;
   app.lastPendingSec = frame.pendingSec;
+  app.lastRevision = frame.revision;
+  app.lastRevealed = frame.revealed;
 }
 
 // ------------------------------------------------------------- interactions
@@ -839,17 +851,19 @@ window.addEventListener('beforeunload', stopLoop);
 setupStartMode();
 
 const urlState = applyUrlParams();
-showView('picker');
+showView(urlState.ready && urlState.applyImmediately ? 'loading' : 'picker');
 
 void (async () => {
+  if (urlState.ready && urlState.applyImmediately) {
+    // Direct links need only their timeline, not the entire contest catalogue.
+    await startVp({ useTimelineDefaults: !urlState.freezeInUrl });
+    void loadContests();
+    return;
+  }
   await loadContests();
   if (!urlState.ready) return;
-
-  // A `uk` (and possibly a past start time) was supplied: jump straight in.
   renderContestList();
   el.btnStart.disabled = false;
-  // Only fill the freeze defaults if the URL did not already state them.
   const selected = app.contests.find((contest) => contest.uk === app.selectedUk);
   if (selected && !urlState.freezeInUrl) syncFreezeDefaults(selected);
-  if (urlState.applyImmediately) await startVp();
 })();

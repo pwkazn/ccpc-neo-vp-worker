@@ -1,6 +1,6 @@
 /.cache/
 /node_modules/
-/dist/
+/dist/**
 /.wrangler/
 *.log
 npm-debug.log*

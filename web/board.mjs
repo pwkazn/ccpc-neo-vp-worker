@@ -121,8 +121,7 @@ export function cellContent(state, teamIdx, probIdx, triesFallback = null, optio
 /** Tooltip for a header cell. */
 export function headerTitle(problem, revealed, solved, submitted) {
   if (!revealed) {
-    return `题号尚未显示：过题队伍数未达门限（当前过题 ${solved} 队，提交 ${submitted} 队）`
-      + (problem.title ? `\n(题目：${problem.title})` : '');
+    return `题号尚未显示：过题队伍数未达门限（当前过题 ${solved} 队，提交 ${submitted} 队）`;
   }
   const lines = [`${problem.alias}${problem.title ? ` — ${problem.title}` : ''}`];
   lines.push(`过题 ${solved} 队 / 提交 ${submitted} 队`);

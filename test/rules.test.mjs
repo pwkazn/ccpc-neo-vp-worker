@@ -1005,7 +1005,7 @@ test('a whole contest freezes, holds, then fully unfreezes at the end', () => {
   assert.equal(ended.revealed, true);
   assert.equal(ended.boardSec, 18000);
   assert.deepEqual(ended.stats.solved, [4, 4, 1], 'the true final counts');
-  assert.deepEqual(ended.stats.revealed, [true, true, false], 'B reveals, C never does');
+  assert.deepEqual(ended.stats.revealed, [true, true, true], 'all identities reveal at the end');
 });
 
 test('session pause and resume preserve the contest second', () => {
@@ -1231,4 +1231,31 @@ test('computeBoard leaves medals null when the ranklist declares none', () => {
   const { state, stats } = replay(timeline, 9999);
   const board = computeBoard(state, 9999, stats);
   assert.ok(board.rows.every((row) => row.medal === null));
+});
+
+for (const freezeEnabled of [false, true]) {
+  test(`session stops at the end and reveals unsolved problems (freeze=${freezeEnabled})`, () => {
+    const timeline = makeTimeline({ teams: 10, problems: 2, events: [] });
+    const session = createSession(timeline, { startAt: 0, now: 0, freezeEnabled });
+    assert.deepEqual(session.frame.stats.revealed, [false, false]);
+    const end = session.update(18000_000);
+    assert.equal(end.phase, PHASE.ENDED);
+    assert.equal(end.contestSec, 18000);
+    assert.deepEqual(end.stats.revealed, [true, true]);
+    assert.deepEqual(end.stats.aliasRevealed, [18000, 18000]);
+    assert.equal(session.update(20000_000).contestSec, 18000);
+    const rewind = session.seek(100);
+    assert.deepEqual(rewind.stats.revealed, [false, false]);
+    session.resume(20000_000);
+    assert.equal(session.update(20001_000).contestSec, 101);
+  });
+}
+
+test('fractional contest end refreshes phase even within the same board second', () => {
+  const timeline = makeTimeline({ teams: 10, problems: 1, events: [], durationSec: 100.5 });
+  const session = createSession(timeline, { startAt: 0, now: 100_000 });
+  assert.equal(session.frame.phase, PHASE.RUNNING);
+  const end = session.update(100_500);
+  assert.equal(end.phase, PHASE.ENDED);
+  assert.deepEqual(end.stats.revealed, [true]);
 });

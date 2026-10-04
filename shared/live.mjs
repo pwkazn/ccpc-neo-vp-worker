@@ -112,9 +112,9 @@ export function createSession(timeline, options = {}) {
 
   /** Contest second the session is currently showing. */
   function currentSec() {
-    return session.detached
+    return Math.min(session.durationSec, session.detached
       ? session.detachSec
-      : session.anchorSec + elapsedSec();
+      : session.anchorSec + elapsedSec());
   }
 
   /**
@@ -204,6 +204,12 @@ export function createSession(timeline, options = {}) {
       officialOnly: session.officialOnly,
     });
 
+    // End-of-contest/manual reveal also unlocks identities below the threshold.
+    if (session.isRevealed()) {
+      stats.revealed.fill(true);
+      stats.aliasRevealed.fill(boardSec);
+    }
+
     // While frozen, how many submissions landed after the board second. The
     // board adds these to the pre-freeze attempt count to render `?N`, and the
     // header's submitted figure keeps growing with them.
@@ -259,6 +265,8 @@ export function createSession(timeline, options = {}) {
     const stale = session.frame === null
       || boardSec !== session.lastBoardSec
       || session.frame.pendingSec !== pendingSec
+      || session.frame.phase !== session.phase()
+      || session.frame.revealed !== session.isRevealed()
       || session.frame.revision !== session.revision;
 
     if (stale) return session.computeFrame();

@@ -217,6 +217,7 @@ test('headerTitle explains a hidden problem and reports live counts', () => {
   assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7, 19), /未达门限/);
   assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7, 19), /7 队/);
   assert.match(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7, 19), /19 队/);
+  assert.doesNotMatch(headerTitle({ alias: 'A', title: 'Alpha' }, false, 7, 19), /A|Alpha/);
   const shown = headerTitle({ alias: 'A', title: 'Alpha' }, true, 123, 456);
   assert.match(shown, /A — Alpha/);
   assert.match(shown, /123 队 \/ 提交 456 队/);
